@@ -554,6 +554,9 @@ class AndroidPluginCompiler
             }
             $attrs[] = "android:foregroundServiceType=\"{$type}\"";
         }
+        if (isset($service['process'])) {
+            $attrs[] = "android:process=\"{$service['process']}\"";
+        }
 
         $attrString = implode("\n            ", $attrs);
 
