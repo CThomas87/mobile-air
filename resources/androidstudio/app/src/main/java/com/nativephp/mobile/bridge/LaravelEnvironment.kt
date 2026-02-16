@@ -3,6 +3,7 @@ package com.nativephp.mobile.bridge
 import android.annotation.SuppressLint
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.os.Build
 import android.util.Base64
 import android.util.Log
 import java.io.File
@@ -731,6 +732,9 @@ class LaravelEnvironment(private val context: Context) {
         try {
             val appBasePath = File(appStorageDir, DIR_LARAVEL).absolutePath
             Log.i(TAG, "🚀 Initializing persistent PHP engine (appBasePath=$appBasePath)")
+            Log.i(TAG, "📱 Android SUPPORTED_ABIS=${Build.SUPPORTED_ABIS.joinToString(",")}")
+            Log.i(TAG, "📱 Android SUPPORTED_64_BIT_ABIS=${Build.SUPPORTED_64_BIT_ABIS.joinToString(",")}")
+            Log.i(TAG, "📦 nativeLibraryDir=${context.applicationInfo.nativeLibraryDir}")
 
             val ok = PhpSupervisorBridge.nativeEngineInit("", "", appBasePath)
             if (ok) {
@@ -1179,7 +1183,13 @@ openssl.cafile="${context.filesDir.absolutePath}/$CACERT_FILE"
         try {
             val result = nativeSetEnv(name, value, 1)
             if (result != 0) {
-                throw RuntimeException("Failed to set environment variable: $name")
+                // Engine is already running with worker threads — setenv() is
+                // blocked because it is not thread-safe.  This is expected on
+                // process restart when PhpWorkerService initialises the engine
+                // before setupEnvironment() completes.  Workers will read env
+                // vars from the .env file via Laravel's Dotenv loader, so this
+                // is non-fatal.
+                Log.w(TAG, "⚠️ Could not set env var (engine running): $name — workers will use .env fallback")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to set environment variable: $name", e)

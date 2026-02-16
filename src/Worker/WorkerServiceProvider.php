@@ -2,8 +2,6 @@
 
 namespace Native\Mobile\Worker;
 
-use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\ServiceProvider;
 
 /**
@@ -75,11 +73,12 @@ class WorkerServiceProvider extends ServiceProvider
         // for artisan commands like 'migrate' — otherwise we'd create the
         // jobs/failed_jobs/job_batches tables before the migration that
         // creates them runs, causing a "table already exists" error.
+        //
+        // Serialized with flock() because multiple worker threads boot
+        // simultaneously and would otherwise race on SQLite writes and
+        // config cache file writes.
         if ($this->isWorkerOrSchedulerLane()) {
-            $this->ensureQueueTablesExist();
-
-            // Pre-cache config for faster worker bootstrap
-            $this->ensureConfigCached();
+            $this->serializedFirstBootTasks();
         }
     }
 
@@ -128,8 +127,10 @@ class WorkerServiceProvider extends ServiceProvider
         $this->app['events']->listen('Illuminate\Database\Events\ConnectionEstablished', function ($event) use ($connection) {
             if ($event->connectionName === $connection) {
                 try {
-                    $event->connection->statement('PRAGMA journal_mode=WAL');
+                    // Set busy_timeout FIRST so the WAL upgrade can retry
+                    // instead of returning SQLITE_BUSY immediately.
                     $event->connection->statement('PRAGMA busy_timeout=5000');
+                    $event->connection->statement('PRAGMA journal_mode=WAL');
                     $event->connection->statement('PRAGMA synchronous=NORMAL');
                     $event->connection->statement('PRAGMA wal_autocheckpoint=100');
                     $event->connection->statement('PRAGMA cache_size=-8000');
@@ -190,9 +191,54 @@ class WorkerServiceProvider extends ServiceProvider
     }
 
     /**
+     * Serialize first-boot tasks across worker threads using flock().
+     *
+     * In ZTS mode, PHP static variables are per-thread, so we cannot use
+     * static flags to prevent cross-thread races.  A filesystem lock
+     * ensures only ONE thread performs table creation and config caching
+     * at a time.
+     */
+    protected function serializedFirstBootTasks(): void
+    {
+        $lockPath = $this->app->storagePath() . '/framework/.worker_init.lock';
+
+        // Ensure directory exists
+        $dir = dirname($lockPath);
+        if (! is_dir($dir)) {
+            @mkdir($dir, 0775, true);
+        }
+
+        $fp = @fopen($lockPath, 'c+');
+        if (! $fp) {
+            // Can't acquire lock file — fall through without serialization
+            $this->ensureQueueTablesExist();
+            return;
+        }
+
+        try {
+            if (flock($fp, LOCK_EX)) {
+                try {
+                    $this->ensureQueueTablesExist();
+                    $this->ensureConfigCached();
+                } finally {
+                    flock($fp, LOCK_UN);
+                }
+            } else {
+                // Couldn't lock — still do table creation (may race but is caught)
+                $this->ensureQueueTablesExist();
+            }
+        } finally {
+            fclose($fp);
+        }
+    }
+
+    /**
      * Auto-create the jobs and failed_jobs tables if they don't exist.
      * This fulfills the "zero-edit" requirement — developers don't need
      * to remember to run queue:table and queue:failed-table migrations.
+     *
+     * Uses IF NOT EXISTS at the SQLite level to avoid TOCTOU races
+     * when multiple worker threads boot concurrently.
      */
     protected function ensureQueueTablesExist(): void
     {
@@ -202,44 +248,47 @@ class WorkerServiceProvider extends ServiceProvider
         }
 
         try {
-            if (! Schema::hasTable('jobs')) {
-                Schema::create('jobs', function ($table) {
-                    $table->id();
-                    $table->string('queue')->index();
-                    $table->longText('payload');
-                    $table->unsignedTinyInteger('attempts');
-                    $table->unsignedInteger('reserved_at')->nullable();
-                    $table->unsignedInteger('available_at');
-                    $table->unsignedInteger('created_at');
-                });
-            }
+            $db = $this->app->make('db')->connection();
 
-            if (! Schema::hasTable('failed_jobs')) {
-                Schema::create('failed_jobs', function ($table) {
-                    $table->id();
-                    $table->string('uuid')->unique();
-                    $table->text('connection');
-                    $table->text('queue');
-                    $table->longText('payload');
-                    $table->longText('exception');
-                    $table->timestamp('failed_at')->useCurrent();
-                });
-            }
+            $db->statement('
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    queue TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    reserved_at INTEGER,
+                    available_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                )
+            ');
+            $db->statement('CREATE INDEX IF NOT EXISTS jobs_queue_index ON jobs (queue)');
 
-            if (! Schema::hasTable('job_batches')) {
-                Schema::create('job_batches', function ($table) {
-                    $table->string('id')->primary();
-                    $table->string('name');
-                    $table->integer('total_jobs');
-                    $table->integer('pending_jobs');
-                    $table->integer('failed_jobs');
-                    $table->longText('failed_job_ids');
-                    $table->mediumText('options')->nullable();
-                    $table->integer('cancelled_at')->nullable();
-                    $table->integer('created_at');
-                    $table->integer('finished_at')->nullable();
-                });
-            }
+            $db->statement('
+                CREATE TABLE IF NOT EXISTS failed_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    uuid TEXT NOT NULL UNIQUE,
+                    connection TEXT NOT NULL,
+                    queue TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    exception TEXT NOT NULL,
+                    failed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+            ');
+
+            $db->statement('
+                CREATE TABLE IF NOT EXISTS job_batches (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL,
+                    total_jobs INTEGER NOT NULL,
+                    pending_jobs INTEGER NOT NULL,
+                    failed_jobs INTEGER NOT NULL,
+                    failed_job_ids TEXT NOT NULL,
+                    options TEXT,
+                    cancelled_at INTEGER,
+                    created_at INTEGER NOT NULL,
+                    finished_at INTEGER
+                )
+            ');
         } catch (\Throwable $e) {
             // Non-fatal during early bootstrap; tables may be created by migrations later
         }
@@ -279,29 +328,23 @@ class WorkerServiceProvider extends ServiceProvider
     /**
      * Ensure Laravel config is cached for faster worker bootstrap.
      *
-     * Worker threads boot the Laravel application on every job. By pre-caching
-     * the merged config, we avoid re-parsing ~30+ config files per boot cycle.
-     * The cache is stored in bootstrap/cache/config.php (standard Laravel location).
+     * NOTE: We intentionally do NOT call Artisan::call('config:cache') at
+     * runtime.  That command creates a fresh Application via
+     * getFreshConfiguration(), which re-triggers the entire service provider
+     * boot chain.  With 3 worker threads doing this simultaneously in ZTS
+     * mode, it causes 6+ concurrent Application bootstraps fighting over
+     * SQLite and filesystem writes — far too expensive on mobile.
+     *
+     * Config caching should be done at build time (native:build) or during
+     * the Kotlin runBaseArtisanCommands() step.  At runtime we only check
+     * whether a cache already exists (no-op fast path).
      */
     protected function ensureConfigCached(): void
     {
-        if (! WorkerConfig::configCacheEnabled()) {
-            return;
-        }
-
-        $cachePath = $this->app->getCachedConfigPath();
-
-        // Only cache if not already cached
-        if (file_exists($cachePath)) {
-            return;
-        }
-
-        try {
-            Artisan::call('config:cache');
-        } catch (\Throwable $e) {
-            // Non-fatal: config caching is an optimization, not a requirement.
-            // May fail during initial bootstrap before all providers are registered.
-        }
+        // Config caching at runtime is intentionally disabled.
+        // If a cache already exists (from build time), Laravel uses it
+        // automatically.  If it doesn't exist, workers load config files
+        // normally — a few hundred ms overhead but no crash risk.
     }
 
 }

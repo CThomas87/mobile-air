@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# scripts/verify_zts.sh — Verify ZTS is enabled in shipped PHP binaries and headers
+# scripts/verify_zts.sh â€” Verify ZTS is enabled in shipped PHP binaries and headers
 #
 # Usage:
 #   ./scripts/verify_zts.sh android  [path/to/libphp.so] [path/to/php_config.h]
 #   ./scripts/verify_zts.sh ios      [path/to/libphp.a]  [path/to/php_config.h]
 #
 # Exit codes:
-#   0 — ZTS verified
-#   1 — ZTS NOT enabled (build must fail)
-#   2 — Usage error
+#   0 â€” ZTS verified
+#   1 â€” ZTS NOT enabled (build must fail)
+#   2 â€” Usage error
 
 set -euo pipefail
 
@@ -39,7 +39,7 @@ if [[ -z "$PLATFORM" ]]; then
     exit 2
 fi
 
-# ─── Header check ───
+# â”€â”€â”€ Header check â”€â”€â”€
 
 check_header() {
     local header="$1"
@@ -56,7 +56,7 @@ check_header() {
 
     # Check for ZTS undefined (explicit failure)
     if grep -q '/\* #undef ZTS \*/' "$header" 2>/dev/null; then
-        fail "php_config.h has '/* #undef ZTS */' — PHP built WITHOUT thread safety!"
+        fail "php_config.h has '/* #undef ZTS */' â€” PHP built WITHOUT thread safety!"
     fi
 
     # Check for PTHREADS (secondary ZTS indicator)
@@ -69,7 +69,7 @@ check_header() {
     return 1
 }
 
-# ─── Binary check ───
+# â”€â”€â”€ Binary check â”€â”€â”€
 
 check_binary_android() {
     local lib="$1"
@@ -136,7 +136,7 @@ check_binary_ios() {
     return 1
 }
 
-# ─── Main ───
+# â”€â”€â”€ Main â”€â”€â”€
 
 echo "=== NativePHP ZTS Verification ==="
 echo "Platform: $PLATFORM"

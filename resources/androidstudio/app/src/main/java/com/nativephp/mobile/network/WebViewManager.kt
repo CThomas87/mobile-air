@@ -4,6 +4,8 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.webkit.*
 import android.widget.Toast
@@ -125,6 +127,8 @@ class WebViewManager(
     }
 
     private fun createCustomWebViewClient(): WebViewClient {
+        val mainHandler = Handler(Looper.getMainLooper())
+
         return object : WebViewClient() {
             private val requestInspector = RequestInspectorWebViewClient(webView)
             private val phpHandler = PHPWebViewClient(phpBridge, context as MainActivity)
@@ -255,7 +259,19 @@ class WebViewManager(
                     // Regular PHP requests
                     url.contains("127.0.0.1") -> {
                         Log.d(TAG, "🌐 Handling PHP request")
-                        phpHandler.handlePHPRequest(request, phpBridge.getLastPostData())
+                        val response = phpHandler.handlePHPRequest(request, phpBridge.getLastPostData())
+
+                        // shouldInterceptRequest bypasses onPageFinished, so we must
+                        // trigger onFirstPageRendered manually after the first
+                        // successful main-frame PHP response.  This starts the
+                        // background worker/supervisor service (queue + scheduler).
+                        if (request.isForMainFrame) {
+                            mainHandler.post {
+                                (context as? MainActivity)?.onFirstPageRendered(url)
+                            }
+                        }
+
+                        response
                     }
                     else -> {
                         Log.d(TAG, "↪️ Delegating to system handler: $url")

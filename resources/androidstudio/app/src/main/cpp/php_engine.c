@@ -16,6 +16,7 @@
 #include "TSRM.h"
 #include "zend.h"
 #include "zend_modules.h"
+#include "zend_extensions.h"
 
 #include <dlfcn.h> /* dladdr — for auto-detecting extension directory */
 
@@ -30,6 +31,7 @@ extern int android_header_handler(sapi_header_struct *sapi_header,
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #ifdef __ANDROID__
 #include <android/log.h>
@@ -58,6 +60,7 @@ static pthread_mutex_t s_engine_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int s_engine_initialized = 0;
 static char s_app_base_path[2048] = {0};
 static char s_ini_entries_buf[8192] = {0};
+static void *s_opcache_probe_handle = NULL;
 
 /* ─── Dummy ub_write for module-level init (no output expected) ─── */
 static size_t engine_null_ub_write(const char *str, size_t str_length)
@@ -75,6 +78,26 @@ static void android_sapi_log_message(const char *message, int syslog_type_int)
 {
     (void)syslog_type_int;
     __android_log_print(ANDROID_LOG_ERROR, "PHP", "%s", message);
+}
+
+static void log_loaded_zend_extensions(void)
+{
+    zend_llist_position pos;
+    zend_extension *extension = (zend_extension *)zend_llist_get_first_ex(&zend_extensions, &pos);
+
+    if (!extension)
+    {
+        ENGINE_LOGI("No Zend extensions loaded");
+        return;
+    }
+
+    while (extension)
+    {
+        ENGINE_LOGI("Loaded Zend extension: %s", extension->name ? extension->name : "(unknown)");
+        extension = (zend_extension *)zend_llist_get_next_ex(&zend_extensions, &pos);
+    }
+
+    ENGINE_LOGI("Zend OPcache present: %s", zend_get_extension("Zend OPcache") ? "yes" : "no");
 }
 
 /* ─── Public API ─── */
@@ -115,6 +138,7 @@ int php_engine_init(const char *ini_path,
      * Use dladdr() on a known PHP symbol to find where libphp.so is loaded,
      * then derive the directory.  This lets PHP find opcache.so if bundled. */
     char ext_dir[1024] = {0};
+    char opcache_path[1200] = {0};
     {
         Dl_info di;
         if (dladdr((void *)php_embed_init, &di) && di.dli_fname)
@@ -125,6 +149,56 @@ int php_engine_init(const char *ini_path,
             if (last_slash)
                 *last_slash = '\0';
             ENGINE_LOGI("Auto-detected extension_dir: %s", ext_dir);
+
+            /*
+             * Android's System.loadLibrary() uses RTLD_LOCAL, so symbols
+             * from libphp.so are NOT visible to subsequently dlopen'd
+             * libraries (e.g. opcache.so needs execute_ex, zend_execute_ex).
+             * Re-open the already-loaded libphp.so with RTLD_GLOBAL to
+             * promote its symbols into the global scope so opcache.so
+             * can resolve them.  RTLD_NOLOAD prevents reloading; it only
+             * changes the flag on the existing handle.
+             */
+            void *php_global = dlopen(di.dli_fname, RTLD_NOW | RTLD_GLOBAL | RTLD_NOLOAD);
+            if (php_global)
+            {
+                ENGINE_LOGI("Promoted libphp.so to RTLD_GLOBAL for extension symbol visibility");
+            }
+            else
+            {
+                const char *dl_err = dlerror();
+                ENGINE_LOGE("Failed to promote libphp.so to RTLD_GLOBAL: %s",
+                            dl_err ? dl_err : "unknown");
+            }
+        }
+
+        if (!ext_dir[0])
+        {
+            ENGINE_LOGE("Could not auto-detect extension_dir via dladdr(php_embed_init)");
+        }
+
+        if (ext_dir[0])
+        {
+            snprintf(opcache_path, sizeof(opcache_path), "%s/opcache.so", ext_dir);
+
+            if (access(opcache_path, R_OK) == 0)
+            {
+                ENGINE_LOGI("Found opcache candidate: %s", opcache_path);
+                s_opcache_probe_handle = dlopen(opcache_path, RTLD_NOW | RTLD_GLOBAL);
+                if (s_opcache_probe_handle)
+                {
+                    ENGINE_LOGI("dlopen probe for opcache.so succeeded");
+                }
+                else
+                {
+                    const char *dl_err = dlerror();
+                    ENGINE_LOGE("dlopen probe for opcache.so failed: %s", dl_err ? dl_err : "unknown");
+                }
+            }
+            else
+            {
+                ENGINE_LOGE("opcache.so not readable at expected path: %s", opcache_path);
+            }
         }
     }
 
@@ -143,7 +217,7 @@ int php_engine_init(const char *ini_path,
               * If opcache.so isn't bundled in the APK, the zend_extension directive
               * produces a harmless warning and PHP continues without opcache. */
              "extension_dir=%s\n"
-             "zend_extension=opcache\n"
+             "zend_extension=%s\n"
              "opcache.enable=1\n"
              "opcache.enable_cli=1\n"
              "opcache.memory_consumption=32\n"
@@ -154,6 +228,7 @@ int php_engine_init(const char *ini_path,
              "opcache.file_update_protection=0\n"
              "%s",
              ext_dir[0] ? ext_dir : "/dev/null",
+             opcache_path[0] ? opcache_path : "opcache.so",
              ini_entries ? ini_entries : "");
 
     /* Configure embed SAPI for module-level init */
@@ -193,6 +268,8 @@ int php_engine_init(const char *ini_path,
         ENGINE_LOGE("php_embed_init FAILED");
         goto done;
     }
+
+    log_loaded_zend_extensions();
 
     /*
      * Shut down the request that php_embed_init started for the main thread.
@@ -253,6 +330,12 @@ void php_engine_shutdown(void)
     }
 
     ENGINE_LOGI("Shutting down PHP engine...");
+
+    if (s_opcache_probe_handle)
+    {
+        dlclose(s_opcache_probe_handle);
+        s_opcache_probe_handle = NULL;
+    }
 
     /*
      * php_embed_shutdown does:

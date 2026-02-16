@@ -14,6 +14,32 @@ use function Laravel\Prompts\warning;
 
 trait InstallsAndroid
 {
+        /**
+         * Return ABI directories that contain a local libphp.so.
+         *
+         * @return array<int, string>
+         */
+        private function getLocalRuntimeAbis(): array
+        {
+            $jniLibsRoot = dirname(__DIR__, 2).'/resources/androidstudio/app/src/main/jniLibs';
+
+            if (! is_dir($jniLibsRoot)) {
+                return [];
+            }
+
+            $abis = [];
+
+            foreach (File::directories($jniLibsRoot) as $abiPath) {
+                if (file_exists($abiPath.'/libphp.so')) {
+                    $abis[] = basename($abiPath);
+                }
+            }
+
+            sort($abis);
+
+            return $abis;
+        }
+
     use PlatformFileOperations;
 
     public string $codename = 'android';
@@ -70,15 +96,29 @@ trait InstallsAndroid
     }
 
     /**
-     * Check if a local PHP binary exists in the template jniLibs directory.
-     * This allows using a custom-compiled binary (e.g. ZTS-enabled) instead
-     * of the pre-built NTS binary from CloudFront.
+     * Check if a complete local PHP runtime bundle exists in the template
+     * jniLibs directory.
+     *
+     * We require both libphp.so and opcache.so so local installs keep parity
+     * with expected runtime performance characteristics.
      */
-    private function hasLocalPhpBinary(): bool
+    private function hasLocalPhpRuntimeBundle(): bool
     {
-        $localBinary = dirname(__DIR__, 2).'/resources/androidstudio/app/src/main/jniLibs/arm64-v8a/libphp.so';
+        $jniLibsRoot = dirname(__DIR__, 2).'/resources/androidstudio/app/src/main/jniLibs';
+        $abis = $this->getLocalRuntimeAbis();
 
-        return file_exists($localBinary);
+        if ($abis === []) {
+            return false;
+        }
+
+        foreach ($abis as $abi) {
+            $base = $jniLibsRoot.'/'.$abi;
+            if (! file_exists($base.'/opcache.so')) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -98,15 +138,29 @@ trait InstallsAndroid
             return true;
         });
 
-        $sizeMB = round(filesize($source.'/arm64-v8a/libphp.so') / 1024 / 1024, 1);
-        $this->components->twoColumnDetail('Local binary size', "{$sizeMB}MB");
+        foreach ($this->getLocalRuntimeAbis() as $abi) {
+            $libphpPath = $source.'/'.$abi.'/libphp.so';
+            $opcachePath = $source.'/'.$abi.'/opcache.so';
+
+            $libphpSizeMB = file_exists($libphpPath)
+                ? round(filesize($libphpPath) / 1024 / 1024, 1).'MB'
+                : 'missing';
+
+            $opcacheSizeMB = file_exists($opcachePath)
+                ? round(filesize($opcachePath) / 1024 / 1024, 1).'MB'
+                : 'missing';
+
+            $this->components->twoColumnDetail("Local libphp.so size ({$abi})", $libphpSizeMB);
+            $this->components->twoColumnDetail("Local opcache.so size ({$abi})", $opcacheSizeMB);
+        }
     }
 
     private function installPHPAndroid(): void
     {
-        // Check for a local custom-compiled binary (e.g. ZTS) before downloading
-        if ($this->hasLocalPhpBinary()) {
-            $this->components->info('Found local PHP binary in resources/androidstudio — skipping CloudFront download.');
+        // Check for a complete local custom-compiled runtime bundle (e.g. ZTS + OPcache)
+        // before downloading.
+        if ($this->hasLocalPhpRuntimeBundle()) {
+            $this->components->info('Found local PHP runtime bundle (libphp.so + opcache.so) in resources/androidstudio — skipping CloudFront download.');
             $this->components->twoColumnDetail('Source', 'Local (custom-compiled)');
             $this->installLocalPhpBinary();
 
