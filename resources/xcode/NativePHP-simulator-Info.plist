@@ -20,5 +20,10 @@
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.nativephp.worker.queue</string>
+		<string>com.nativephp.worker.scheduler</string>
+	</array>
 </dict>
 </plist>

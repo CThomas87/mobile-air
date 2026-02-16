@@ -62,6 +62,12 @@ add_library(php_wrapper SHARED
         php_bridge.c
         libphp_wrapper.cpp
         bridge_jni.cpp
+        php_engine.c
+        php_thread_context.c
+        php_request_context.c
+        worker_pool.c
+        scheduler_gate.c
+        supervisor.c
 )
 
 target_include_directories(php_wrapper PUBLIC
@@ -78,6 +84,29 @@ target_link_libraries(php_wrapper
         log
         dl
         php
+)
+
+# ─── ZTS Build Check ───
+# Check whether php_config.h has ZTS defined.
+# If not, the build proceeds in NTS (non-thread-safe) mode with single-worker
+# concurrency only. Multi-worker requires a ZTS-enabled PHP binary.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/include/php_config.h" PHP_CONFIG_CONTENT)
+string(FIND "${PHP_CONFIG_CONTENT}" "#define ZTS 1" ZTS_FOUND)
+string(FIND "${PHP_CONFIG_CONTENT}" "/* #undef ZTS */" ZTS_UNDEF_FOUND)
+
+if(ZTS_UNDEF_FOUND GREATER -1)
+    message(FATAL_ERROR
+        "PHP was built WITHOUT ZTS (Zend Thread Safety). "
+        "Multi-worker concurrency requires ZTS. "
+        "Rebuild PHP with --enable-zts.")
+endif()
+
+if(ZTS_FOUND GREATER -1)
+    message(STATUS "ZTS confirmed in php_config.h — multi-worker mode available.")
+endif()
+
+target_compile_definitions(php_wrapper PRIVATE
+        NATIVEPHP_REQUIRE_ZTS=1
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

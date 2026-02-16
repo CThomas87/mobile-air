@@ -69,8 +69,50 @@ trait InstallsAndroid
         $this->components->task('Creating Android project', fn () => $this->platformOptimizedCopy($source, $androidPath));
     }
 
+    /**
+     * Check if a local PHP binary exists in the template jniLibs directory.
+     * This allows using a custom-compiled binary (e.g. ZTS-enabled) instead
+     * of the pre-built NTS binary from CloudFront.
+     */
+    private function hasLocalPhpBinary(): bool
+    {
+        $localBinary = dirname(__DIR__, 2).'/resources/androidstudio/app/src/main/jniLibs/arm64-v8a/libphp.so';
+
+        return file_exists($localBinary);
+    }
+
+    /**
+     * Copy the local PHP binary from the template to the build directory,
+     * skipping the CloudFront download entirely.
+     */
+    private function installLocalPhpBinary(): void
+    {
+        $source = dirname(__DIR__, 2).'/resources/androidstudio/app/src/main/jniLibs';
+        $destination = base_path('nativephp/android/app/src/main/jniLibs');
+
+        File::ensureDirectoryExists($destination);
+
+        $this->components->task('Installing local PHP binary (ZTS)', function () use ($source, $destination) {
+            $this->platformOptimizedCopy($source, $destination);
+
+            return true;
+        });
+
+        $sizeMB = round(filesize($source.'/arm64-v8a/libphp.so') / 1024 / 1024, 1);
+        $this->components->twoColumnDetail('Local binary size', "{$sizeMB}MB");
+    }
+
     private function installPHPAndroid(): void
     {
+        // Check for a local custom-compiled binary (e.g. ZTS) before downloading
+        if ($this->hasLocalPhpBinary()) {
+            $this->components->info('Found local PHP binary in resources/androidstudio — skipping CloudFront download.');
+            $this->components->twoColumnDetail('Source', 'Local (custom-compiled)');
+            $this->installLocalPhpBinary();
+
+            return;
+        }
+
         $includeIcu = $this->includeIcu ?? false;
 
         $url = $includeIcu

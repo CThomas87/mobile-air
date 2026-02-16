@@ -103,10 +103,6 @@
 /* Define to 1 if the PHP extension 'mysqlnd' is built as a dynamic module. */
 /* #undef COMPILE_DL_MYSQLND */
 
-/* Define to 1 if the PHP extension 'nativephp' is built as a dynamic module.
-   */
-/* #undef COMPILE_DL_NATIVEPHP */
-
 /* Define to 1 if the PHP extension 'odbc' is built as a dynamic module. */
 /* #undef COMPILE_DL_ODBC */
 
@@ -388,7 +384,7 @@
 #define HAVE_ATOLL 1
 
 /* Define to 1 if the compiler supports the 'aligned' variable attribute. */
-/* #undef HAVE_ATTRIBUTE_ALIGNED */
+#define HAVE_ATTRIBUTE_ALIGNED 1
 
 /* Define to 1 if the PHP extension 'bcmath' is available. */
 #define HAVE_BCMATH 1
@@ -412,12 +408,12 @@
 /* #undef HAVE_BZ2 */
 
 /* Define to 1 if the PHP extension 'calendar' is available. */
-/* #undef HAVE_CALENDAR */
+#define HAVE_CALENDAR 1
 
 /* Define to 1 if libzip library has the
    'zip_register_cancel_callback_with_state' function (available since 1.6.0).
    */
-/* #undef HAVE_CANCEL_CALLBACK */
+#define HAVE_CANCEL_CALLBACK 1
 
 /* Define to 1 if Capstone is available. */
 /* #undef HAVE_CAPSTONE */
@@ -456,7 +452,7 @@
 /* #undef HAVE_COMMONCRYPTO_COMMONRANDOM_H */
 
 /* Define to 1 if you have the 'copy_file_range' function. */
-#define HAVE_COPY_FILE_RANGE 1
+/* #undef HAVE_COPY_FILE_RANGE */
 
 /* Define to 1 if '__cpuid_count' is available. */
 /* #undef HAVE_CPUID_COUNT */
@@ -477,7 +473,7 @@
 /* #undef HAVE_CRYPT_R */
 
 /* Define to 1 if you have the 'ctermid' function. */
-/* #undef HAVE_CTERMID */
+#define HAVE_CTERMID 1
 
 /* Define to 1 if you have the 'ctime_r' function. */
 #define HAVE_CTIME_R 1
@@ -506,19 +502,19 @@
 
 /* Define to 1 if you have the declaration of 'P_ALL', and to 0 if you don't.
    */
-/* #undef HAVE_DECL_P_ALL */
+#define HAVE_DECL_P_ALL 1
 
 /* Define to 1 if you have the declaration of 'P_JAILID', and to 0 if you
    don't. */
-/* #undef HAVE_DECL_P_JAILID */
+#define HAVE_DECL_P_JAILID 0
 
 /* Define to 1 if you have the declaration of 'P_PIDFD', and to 0 if you
    don't. */
-/* #undef HAVE_DECL_P_PIDFD */
+#define HAVE_DECL_P_PIDFD 1
 
 /* Define to 1 if you have the declaration of 'P_UID', and to 0 if you don't.
    */
-/* #undef HAVE_DECL_P_UID */
+#define HAVE_DECL_P_UID 0
 
 /* Define to 1 if you have the declaration of 'strerror_r', and to 0 if you
    don't. */
@@ -533,19 +529,19 @@
 
 /* Define to 1 if you have the declaration of 'WCONTINUED', and to 0 if you
    don't. */
-/* #undef HAVE_DECL_WCONTINUED */
+#define HAVE_DECL_WCONTINUED 1
 
 /* Define to 1 if you have the declaration of 'WEXITED', and to 0 if you
    don't. */
-/* #undef HAVE_DECL_WEXITED */
+#define HAVE_DECL_WEXITED 1
 
 /* Define to 1 if you have the declaration of 'WNOWAIT', and to 0 if you
    don't. */
-/* #undef HAVE_DECL_WNOWAIT */
+#define HAVE_DECL_WNOWAIT 1
 
 /* Define to 1 if you have the declaration of 'WSTOPPED', and to 0 if you
    don't. */
-/* #undef HAVE_DECL_WSTOPPED */
+#define HAVE_DECL_WSTOPPED 1
 
 /* Define to 1 if you have the <dirent.h> header file. */
 #define HAVE_DIRENT_H 1
@@ -566,10 +562,10 @@
 /* #undef HAVE_DNS_SEARCH */
 
 /* Define to 1 if you have the 'dn_expand' function. */
-#define HAVE_DN_EXPAND 1
+/* #undef HAVE_DN_EXPAND */
 
 /* Define to 1 if you have the 'dn_skipname' function. */
-#define HAVE_DN_SKIPNAME 1
+/* #undef HAVE_DN_SKIPNAME */
 
 /* Define to 1 if the PHP extension 'dom' is available. */
 #define HAVE_DOM 1
@@ -599,7 +595,7 @@
 
 /* Define to 1 if libzip library has encryption support (available since
    1.2.0). */
-/* #undef HAVE_ENCRYPTION */
+#define HAVE_ENCRYPTION 1
 
 /* Define to 1 if system has a working epoll. */
 /* #undef HAVE_EPOLL */
@@ -612,7 +608,7 @@
 /* #undef HAVE_ESOOB */
 
 /* Define to 1 if the PHP extension 'exif' is available. */
-/* #undef HAVE_EXIF */
+#define HAVE_EXIF 1
 
 /* Define to 1 if you have the 'explicit_bzero' function. */
 /* #undef HAVE_EXPLICIT_BZERO */
@@ -684,10 +680,10 @@
 #define HAVE_FTOK 1
 
 /* Define to 1 if the PHP extension 'ftp' is available. */
-/* #undef HAVE_FTP */
+#define HAVE_FTP 1
 
 /* Define to 1 if FTP over SSL is enabled. */
-/* #undef HAVE_FTP_SSL */
+#define HAVE_FTP_SSL 1
 
 /* Define to 1 if the system has the `ifunc' function attribute */
 /* #undef HAVE_FUNC_ATTRIBUTE_IFUNC */
@@ -696,7 +692,7 @@
 /* #undef HAVE_FUNC_ATTRIBUTE_TARGET */
 
 /* Define to 1 if the system has the `visibility' function attribute */
-/* #undef HAVE_FUNC_ATTRIBUTE_VISIBILITY */
+#define HAVE_FUNC_ATTRIBUTE_VISIBILITY 1
 
 /* Define to 1 if you have the three-argument form of gethostbyname_r(). */
 /* #undef HAVE_FUNC_GETHOSTBYNAME_R_3 */
@@ -764,10 +760,10 @@
 #define HAVE_GETCWD 1
 
 /* Define to 1 if you have the 'getgrgid_r' function. */
-/* #undef HAVE_GETGRGID_R */
+#define HAVE_GETGRGID_R 1
 
 /* Define to 1 if you have the 'getgrnam_r' function. */
-/* #undef HAVE_GETGRNAM_R */
+#define HAVE_GETGRNAM_R 1
 
 /* Define to 1 if you have the 'getgroups' function. */
 #define HAVE_GETGROUPS 1
@@ -776,10 +772,10 @@
 #define HAVE_GETHOSTBYNAME_R 1
 
 /* Define to 1 if you have the 'gethostname' function. */
-/* #undef HAVE_GETHOSTNAME */
+#define HAVE_GETHOSTNAME 1
 
 /* Define to 1 if you have the 'getifaddrs' function. */
-/* #undef HAVE_GETIFADDRS */
+#define HAVE_GETIFADDRS 1
 
 /* Define to 1 if you have the 'getloadavg' function. */
 /* #undef HAVE_GETLOADAVG */
@@ -797,7 +793,7 @@
 #define HAVE_GETPID 1
 
 /* Define to 1 if you have the 'getpriority' function. */
-/* #undef HAVE_GETPRIORITY */
+#define HAVE_GETPRIORITY 1
 
 /* Define to 1 if you have the 'getprotobyname' function. */
 #define HAVE_GETPROTOBYNAME 1
@@ -812,7 +808,7 @@
 #define HAVE_GETPWUID_R 1
 
 /* Define to 1 if you have the 'getrandom' function. */
-/* #undef HAVE_GETRANDOM */
+#define HAVE_GETRANDOM 1
 
 /* Define to 1 if you have the 'getrlimit' function. */
 #define HAVE_GETRLIMIT 1
@@ -821,7 +817,7 @@
 #define HAVE_GETRUSAGE 1
 
 /* Define to 1 if you have the 'getservbyname' function. */
-/* #undef HAVE_GETSERVBYNAME */
+#define HAVE_GETSERVBYNAME 1
 
 /* Define to 1 if you have the 'getservbyport' function. */
 #define HAVE_GETSERVBYPORT 1
@@ -857,7 +853,7 @@
 /* #undef HAVE_HISTORY_LIST */
 
 /* Define to 1 if you have the 'hstrerror' function. */
-/* #undef HAVE_HSTRERROR */
+#define HAVE_HSTRERROR 1
 
 /* Define to 1 to enable copying PHP CODE pages into HUGE PAGES. */
 #define HAVE_HUGE_CODE_PAGES 1
@@ -875,10 +871,10 @@
 /* #undef HAVE_IEEEFP_H */
 
 /* Define to 1 if you have the 'if_indextoname' function. */
-/* #undef HAVE_IF_INDEXTONAME */
+#define HAVE_IF_INDEXTONAME 1
 
 /* Define to 1 if you have the 'if_nametoindex' function. */
-/* #undef HAVE_IF_NAMETOINDEX */
+#define HAVE_IF_NAMETOINDEX 1
 
 /* Define to 1 if you have the <immintrin.h> header file. */
 /* #undef HAVE_IMMINTRIN_H */
@@ -1013,7 +1009,7 @@
 /* #undef HAVE_LIBSOCKET */
 
 /* Define to 1 if the PHP extension 'sodium' is available. */
-/* #undef HAVE_LIBSODIUMLIB */
+#define HAVE_LIBSODIUMLIB 1
 
 /* Define to 1 if you have the libwebp library. */
 /* #undef HAVE_LIBWEBP */
@@ -1023,10 +1019,10 @@
 
 /* Define to 1 if libzip library has the 'zip_libzip_version' function
    (available since 1.3.1). */
-/* #undef HAVE_LIBZIP_VERSION */
+#define HAVE_LIBZIP_VERSION 1
 
 /* Define to 1 if you have the <linux/filter.h> header file. */
-/* #undef HAVE_LINUX_FILTER_H */
+#define HAVE_LINUX_FILTER_H 1
 
 /* Define to 1 if you have the <linux/sock_diag.h> header file. */
 #define HAVE_LINUX_SOCK_DIAG_H 1
@@ -1068,14 +1064,14 @@
 #define HAVE_MEMMEM 1
 
 /* Define to 1 if you have the 'mempcpy' function. */
-/* #undef HAVE_MEMPCPY */
+#define HAVE_MEMPCPY 1
 
 /* Define to 1 if you have the 'memrchr' function. */
 #define HAVE_MEMRCHR 1
 
 /* Define to 1 if libzip library has 'zip_*_method_supported' functions
    (available since 1.7.0). */
-/* #undef HAVE_METHOD_SUPPORTED */
+#define HAVE_METHOD_SUPPORTED 1
 
 /* Define to 1 if you have the <minix/config.h> header file. */
 /* #undef HAVE_MINIX_CONFIG_H */
@@ -1101,9 +1097,6 @@
 /* Define to 1 if you have the 'nanosleep' function. */
 #define HAVE_NANOSLEEP 1
 
-/* Have NativePHP support */
-#define HAVE_NATIVEPHP 1
-
 /* Define to 1 if you have the <netinet/in.h> header file. */
 #define HAVE_NETINET_IN_H 1
 
@@ -1117,7 +1110,7 @@
 #define HAVE_NICE 1
 
 /* Define to 1 if you have the 'nl_langinfo' function. */
-/* #undef HAVE_NL_LANGINFO */
+#define HAVE_NL_LANGINFO 1
 
 /* Define to 1 if you have the <nmmintrin.h> header file. */
 /* #undef HAVE_NMMINTRIN_H */
@@ -1126,7 +1119,7 @@
 /* #undef HAVE_ODBC_H */
 
 /* Define to 1 if you have the 'openpty' function. */
-/* #undef HAVE_OPENPTY */
+#define HAVE_OPENPTY 1
 
 /* Define to 1 to enable OpenSSL argon2 password hashing. */
 /* #undef HAVE_OPENSSL_ARGON2 */
@@ -1215,7 +1208,7 @@
 /* Define to 1 if libzip library has the
    'zip_register_progress_callback_with_state' function (available since
    1.3.0). */
-/* #undef HAVE_PROGRESS_CALLBACK */
+#define HAVE_PROGRESS_CALLBACK 1
 
 /* Define to 1 if you have the 'pset_bind' function. */
 /* #undef HAVE_PSET_BIND */
@@ -1272,10 +1265,10 @@
 /* #undef HAVE_RES_NDESTROY */
 
 /* Define to 1 if you have the 'res_nsearch' function. */
-#define HAVE_RES_NSEARCH 1
+/* #undef HAVE_RES_NSEARCH */
 
 /* Define to 1 if you have the 'res_search' function. */
-#define HAVE_RES_SEARCH 1
+/* #undef HAVE_RES_SEARCH */
 
 /* Define to 1 if you have the 'rfork' function. */
 /* #undef HAVE_RFORK */
@@ -1301,7 +1294,7 @@
 /* #undef HAVE_SCHED_GETCPU */
 
 /* Define to 1 if you have the 'sched_setaffinity' function. */
-/* #undef HAVE_SCHED_SETAFFINITY */
+#define HAVE_SCHED_SETAFFINITY 1
 
 /* Define to 1 if system has a working 'select' function. */
 /* #undef HAVE_SELECT */
@@ -1325,7 +1318,7 @@
 /* #undef HAVE_SETPFLAGS */
 
 /* Define to 1 if you have the 'setpriority' function. */
-/* #undef HAVE_SETPRIORITY */
+#define HAVE_SETPRIORITY 1
 
 /* Define to 1 if you have the 'setproctitle' function. */
 /* #undef HAVE_SETPROCTITLE */
@@ -1341,7 +1334,7 @@
 
 /* Define to 1 if libzip library has the 'zip_file_set_mtime' function
    (available since 1.0.0). */
-/* #undef HAVE_SET_MTIME */
+#define HAVE_SET_MTIME 1
 
 /* Define to 1 if the PHP extension 'shmop' is available. */
 /* #undef HAVE_SHMOP */
@@ -1371,10 +1364,10 @@
 #define HAVE_SIGPROCMASK 1
 
 /* Define to 1 if you have the 'sigtimedwait' function. */
-/* #undef HAVE_SIGTIMEDWAIT */
+#define HAVE_SIGTIMEDWAIT 1
 
 /* Define to 1 if you have the 'sigwaitinfo' function. */
-/* #undef HAVE_SIGWAITINFO */
+#define HAVE_SIGWAITINFO 1
 
 /* Define to 1 if the PHP extension 'simplexml' is available. */
 #define HAVE_SIMPLEXML 1
@@ -1394,7 +1387,7 @@
 /* #undef HAVE_SNMP_SHA512 */
 
 /* Define to 1 if the PHP extension 'soap' is available. */
-/* #undef HAVE_SOAP */
+#define HAVE_SOAP 1
 
 /* Define to 1 if you have the 'sockatmark' function. */
 /* #undef HAVE_SOCKATMARK */
@@ -1403,7 +1396,7 @@
 #define HAVE_SOCKETPAIR 1
 
 /* Define to 1 if the PHP extension 'sockets' is available. */
-/* #undef HAVE_SOCKETS */
+#define HAVE_SOCKETS 1
 
 /* Define to 1 if the system has the type 'socklen_t'. */
 #define HAVE_SOCKLEN_T 1
@@ -1526,7 +1519,7 @@
 #define HAVE_STRUCT_SOCKADDR_STORAGE 1
 
 /* Define to 1 if 'ss_family' is a member of 'struct sockaddr_storage'. */
-/* #undef HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY */
+#define HAVE_STRUCT_SOCKADDR_STORAGE_SS_FAMILY 1
 
 /* Define to 1 if 'sun_len' is a member of 'struct sockaddr_un'. */
 /* #undef HAVE_STRUCT_SOCKADDR_UN_SUN_LEN */
@@ -1547,7 +1540,7 @@
 #define HAVE_STRUCT_TM_TM_ZONE 1
 
 /* Define to 1 if the system has the type 'struct ucred'. */
-/* #undef HAVE_STRUCT_UCRED */
+#define HAVE_STRUCT_UCRED 1
 
 /* Define to 1 if 'domainname' is a member of 'struct utsname'. */
 #define HAVE_STRUCT_UTSNAME_DOMAINNAME 1
@@ -1658,6 +1651,9 @@
 /* Define to 1 if you have the <tidybuffio.h> header file. */
 /* #undef HAVE_TIDYBUFFIO_H */
 
+/* Define to 1 if tidyOptGetCategory is available. */
+/* #undef HAVE_TIDYOPTGETCATEGORY */
+
 /* Define to 1 if Tidy library has the 'tidyOptGetDoc' function. */
 /* #undef HAVE_TIDYOPTGETDOC */
 
@@ -1712,7 +1708,7 @@
 #define HAVE_UNSETENV 1
 
 /* Define to 1 if you have the 'unshare' function. */
-/* #undef HAVE_UNSHARE */
+#define HAVE_UNSHARE 1
 
 /* Define to 1 if the PHP extension 'odbc' is available. */
 /* #undef HAVE_UODBC */
@@ -1746,16 +1742,16 @@
 /* #undef HAVE_WAIT3 */
 
 /* Define to 1 if you have the 'wait4' function. */
-/* #undef HAVE_WAIT4 */
+#define HAVE_WAIT4 1
 
 /* Define to 1 if you have the 'waitid' function. */
-/* #undef HAVE_WAITID */
+#define HAVE_WAITID 1
 
 /* Define to 1 if you have the <wchar.h> header file. */
 #define HAVE_WCHAR_H 1
 
 /* Define to 1 if you have the 'WIFCONTINUED' function. */
-/* #undef HAVE_WIFCONTINUED */
+#define HAVE_WIFCONTINUED 1
 
 /* Define to 1 if you have the <wmmintrin.h> header file. */
 /* #undef HAVE_WMMINTRIN_H */
@@ -1779,7 +1775,7 @@
 /* #undef HAVE_XSL_EXSLT */
 
 /* Define to 1 if the PHP extension 'zip' is available. */
-/* #undef HAVE_ZIP */
+#define HAVE_ZIP 1
 
 /* Define to 1 if the PHP extension 'zlib' is available. */
 #define HAVE_ZLIB 1
@@ -1900,7 +1896,7 @@
 /* #undef PHP_BUILD_PROVIDER */
 
 /* The system that PHP was built on. */
-#define PHP_BUILD_SYSTEM "Darwin mac.lan 24.5.0 Darwin Kernel Version 24.5.0: Wed Mar 26 22:22:19 PDT 2025; root:xnu-11417.120.80.501.1~2/RELEASE_ARM64_T8132 arm64"
+#define PHP_BUILD_SYSTEM "Linux DESKTOP-79F51C0 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 5 18:30:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux"
 
 /* Define to 1 if your system has fork/vfork/CreateProcess. */
 #define PHP_CAN_SUPPORT_PROC_OPEN 1
@@ -1981,7 +1977,7 @@
 #define PHP_ONIG_BAD_KOI8_ENTRY 1
 
 /* The 'uname' output. */
-#define PHP_OS "Darwin"
+#define PHP_OS "Linux"
 
 /* Define to 1 if 'pread' declaration with 'off64_t' is missing. */
 /* #undef PHP_PREAD_64 */
@@ -1993,7 +1989,7 @@
 #define PHP_SIGCHILD 0
 
 /* The 'uname -a' output. */
-#define PHP_UNAME "Darwin mac.lan 24.5.0 Darwin Kernel Version 24.5.0: Wed Mar 26 22:22:19 PDT 2025; root:xnu-11417.120.80.501.1~2/RELEASE_ARM64_T8132 arm64"
+#define PHP_UNAME "Linux DESKTOP-79F51C0 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun 5 18:30:46 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux"
 
 /* Define to 1 if PHP uses its own crypt_r, and to 0 if using the external
    crypt library. */
@@ -2064,7 +2060,7 @@
 #define STDC_HEADERS 1
 
 /* Define to 1 if strerror_r returns char *. */
-/* #undef STRERROR_R_CHAR_P */
+#define STRERROR_R_CHAR_P 1
 
 /* The Tokyo Cabinet handler header file. */
 /* #undef TCADB_INCLUDE_FILE */
@@ -2187,7 +2183,7 @@
 /* #undef ZEND_FIBER_UCONTEXT */
 
 /* Define to 1 if Zend max execution timers are supported and enabled. */
-/* #undef ZEND_MAX_EXECUTION_TIMERS */
+#define ZEND_MAX_EXECUTION_TIMERS 1
 
 /* Number of bytes for the ZEND_MM alignment. */
 #define ZEND_MM_ALIGNMENT (size_t)8
@@ -2202,7 +2198,7 @@
 #define ZEND_SIGNALS 1
 
 /* Define to 1 if thread safety (ZTS) is enabled. */
-/* #undef ZTS */
+#define ZTS 1
 
 /* */
 /* #undef _XOPEN_SOURCE */

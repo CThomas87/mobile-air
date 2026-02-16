@@ -1,0 +1,41 @@
+<!--
+  AndroidManifest additions for PHP Worker Service.
+  
+  Add these declarations inside the <application> tag of your AndroidManifest.xml.
+  Also add the required permissions at the <manifest> level.
+-->
+
+<!-- ═══ Permissions (add at <manifest> level) ═══ -->
+<!--
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+<uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+-->
+
+<!-- ═══ Service + Receiver (add inside <application>) ═══ -->
+
+<!-- PHP Worker Foreground Service -->
+<service
+    android:name="com.nativephp.mobile.worker.PhpWorkerService"
+    android:enabled="true"
+    android:exported="false"
+    android:foregroundServiceType="dataSync"
+    android:stopWithTask="false">
+    <intent-filter>
+        <action android:name="com.nativephp.mobile.worker.START" />
+        <action android:name="com.nativephp.mobile.worker.STOP" />
+        <action android:name="com.nativephp.mobile.worker.STATUS" />
+    </intent-filter>
+</service>
+
+<!-- Boot receiver to restart service after device reboot -->
+<receiver
+    android:name="com.nativephp.mobile.worker.WorkerBootReceiver"
+    android:enabled="true"
+    android:exported="true">
+    <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+    </intent-filter>
+</receiver>

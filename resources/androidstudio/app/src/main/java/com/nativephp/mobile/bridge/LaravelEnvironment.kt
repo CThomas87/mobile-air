@@ -2,6 +2,8 @@ package com.nativephp.mobile.bridge
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.util.Base64
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
@@ -13,7 +15,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.security.SecureRandom
 import kotlinx.coroutines.*
+import com.nativephp.mobile.worker.PhpSupervisorBridge
 
 class LaravelEnvironment(private val context: Context) {
     private val appStorageDir = context.getDir("storage", Context.MODE_PRIVATE)
@@ -50,6 +54,7 @@ class LaravelEnvironment(private val context: Context) {
         private const val BUNDLE_ZIP = "laravel_bundle.zip"
         private const val OTA_MARKER = ".ota_applied"
         private const val VERSION_FILE = ".version"
+        private const val BUNDLE_HASH_FILE = ".bundle_hash"
         private const val ENV_FILE = ".env"
         private const val CACERT_FILE = "cacert.pem"
         private const val PHP_INI_FILE = "php.ini"
@@ -127,37 +132,59 @@ class LaravelEnvironment(private val context: Context) {
 
     fun initialize() {
         try {
+            val initStart = System.currentTimeMillis()
             val persistedPublic = File(appStorageDir, "persisted_data/storage/app/public")
 
             Log.d(TAG, "🔍 CHECKPOINT 1 - BEFORE setupDirectories: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+            var stepStart = System.currentTimeMillis()
             setupDirectories()
-            Log.d(TAG, "🔍 CHECKPOINT 2 - AFTER setupDirectories: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+            Log.i(TAG, "⏱️ [TIMING] setupDirectories: ${System.currentTimeMillis() - stepStart}ms")
 
             // Check for OTA updates first (reads BIFROST_APP_ID from bundled .env)
-            if (checkAndApplyOTAUpdate()) {
+            stepStart = System.currentTimeMillis()
+            val didUpdateOrExtract = if (checkAndApplyOTAUpdate()) {
                 Log.d(TAG, "✅ OTA update applied successfully")
-                Log.d(TAG, "🔍 CHECKPOINT 3 - AFTER OTA: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+                Log.i(TAG, "⏱️ [TIMING] OTA update: ${System.currentTimeMillis() - stepStart}ms")
+                true
             } else {
                 // No OTA update - extract bundled version if needed
-                Log.d(TAG, "🔍 CHECKPOINT 3a - BEFORE extractLaravelBundle: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
-                extractLaravelBundle()
-                Log.d(TAG, "🔍 CHECKPOINT 3b - AFTER extractLaravelBundle: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+                stepStart = System.currentTimeMillis()
+                val extracted = extractLaravelBundle()
+                Log.i(TAG, "⏱️ [TIMING] extractLaravelBundle: ${System.currentTimeMillis() - stepStart}ms")
+                extracted
             }
 
-            Log.d(TAG, "🔍 CHECKPOINT 4 - BEFORE setupEnvironment: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+            stepStart = System.currentTimeMillis()
             setupEnvironment()
-            Log.d(TAG, "🔍 CHECKPOINT 5 - AFTER setupEnvironment: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+            Log.i(TAG, "⏱️ [TIMING] setupEnvironment: ${System.currentTimeMillis() - stepStart}ms")
 
-            Log.d(TAG, "🔍 CHECKPOINT 6 - BEFORE runBaseArtisanCommands: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
-            runBaseArtisanCommands()
-            Log.d(TAG, "🔍 CHECKPOINT 7 - AFTER runBaseArtisanCommands: exists=${persistedPublic.exists()}, files=${persistedPublic.listFiles()?.joinToString { it.name } ?: "none"}")
+            // Run essential artisan commands in LEGACY MODE (per-request php_embed_init/shutdown).
+            // Migrations are timeout-guarded so cold boot cannot block the UI for 60s+.
+            stepStart = System.currentTimeMillis()
+            runBaseArtisanCommands(didUpdateOrExtract)
+            Log.i(TAG, "⏱️ [TIMING] runBaseArtisanCommands: ${System.currentTimeMillis() - stepStart}ms")
+
+            // Post-migration diagnostic: list every table in the SQLite DB.
+            // Writes to both logcat AND persisted_data/storage/logs/laravel.log
+            // so we can confirm migrations actually created tables.
+            val dbFile = File(appStorageDir, "persisted_data/database/database.sqlite")
+            auditDatabaseTables(dbFile)
+
+            // Initialize persistent engine before first render so HTTP requests
+            // run on the ZTS engine path (same model used by workers).
+            stepStart = System.currentTimeMillis()
+            initPhpEngine()
+            Log.i(TAG, "⏱️ [TIMING] initPhpEngine: ${System.currentTimeMillis() - stepStart}ms")
+
+            val totalTime = System.currentTimeMillis() - initStart
+            Log.i(TAG, "⏱️ [TIMING] initialize() TOTAL: ${totalTime}ms")
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing Laravel environment", e)
             throw RuntimeException("Failed to initialize Laravel environment", e)
         }
     }
 
-    private fun extractLaravelBundle() {
+    private fun extractLaravelBundle(): Boolean {
         val laravelDir = File(appStorageDir, DIR_LARAVEL)
         val otaMarkerFile = File(laravelDir, OTA_MARKER)
 
@@ -179,7 +206,7 @@ class LaravelEnvironment(private val context: Context) {
         else if (otaMarkerFile.exists() && isBundledOtaConfigured) {
             val otaVersion = otaMarkerFile.readText().trim()
             Log.d(TAG, "✅ OTA update version $otaVersion is active, skipping bundle extraction")
-            return
+            return false
         }
 
         // Get embedded version using VersionInfo wrapper
@@ -188,7 +215,7 @@ class LaravelEnvironment(private val context: Context) {
 
         if (embeddedVersion == null) {
             Log.e(TAG, "❌ Couldn't read version from laravel_bundle.zip")
-            return
+            return false
         }
 
         Log.d(TAG, "🔍 DEBUG: embeddedVersion from bundle = '${embeddedVersion.raw}'")
@@ -210,16 +237,24 @@ class LaravelEnvironment(private val context: Context) {
         Log.d(TAG, "🔍 DEBUG: embeddedVersion.clean = '${embeddedVersion.clean}'")
         Log.d(TAG, "🔍 DEBUG: isDebugOverride = ${embeddedVersion.isDebug}")
 
-        // If DEBUG mode, ALWAYS extract. Otherwise, only extract if versions don't match
+        // If DEBUG mode, ALWAYS extract.
+        // Otherwise extract when app version differs OR bundled zip hash differs.
         val isUpToDate = currentVersion?.clean == embeddedVersion.clean
-        val shouldExtract = embeddedVersion.isDebug || !isUpToDate
+        val bundledZipHash = readBundledZipHash()
+        val extractedBundleHash = File(laravelDir, BUNDLE_HASH_FILE)
+            .takeIf { it.exists() }
+            ?.readText()
+            ?.trim()
+        val bundleHashChanged = bundledZipHash != null && bundledZipHash != extractedBundleHash
+        val shouldExtract = embeddedVersion.isDebug || !isUpToDate || bundleHashChanged
 
         Log.d(TAG, "🔍 DEBUG: isUpToDate = $isUpToDate")
+        Log.d(TAG, "🔍 DEBUG: bundleHashChanged = $bundleHashChanged")
         Log.d(TAG, "🔍 DEBUG: shouldExtract = $shouldExtract")
 
         if (!shouldExtract) {
             Log.d(TAG, "✅ Laravel already up to date (version ${embeddedVersion.clean})")
-            return
+            return false
         }
 
         Log.d(TAG, "📦 Extracting Laravel bundle (new version: ${embeddedVersion.raw})")
@@ -250,6 +285,10 @@ class LaravelEnvironment(private val context: Context) {
             val zipStream = context.assets.open(BUNDLE_ZIP)
             unzip(zipStream, laravelDir)
 
+            if (!bundledZipHash.isNullOrEmpty()) {
+                File(laravelDir, BUNDLE_HASH_FILE).writeText(bundledZipHash)
+            }
+
             // Remove OTA marker if it exists (we're back to bundled version)
             if (otaMarkerFile.exists()) {
                 otaMarkerFile.delete()
@@ -270,6 +309,9 @@ class LaravelEnvironment(private val context: Context) {
             // Even though we use persisted_data/storage, hot reload needs laravel/storage/framework to exist
             val laravelStorageFramework = File(laravelDir, "storage/framework")
             laravelStorageFramework.mkdirs()
+            File(laravelStorageFramework, "views").mkdirs()
+            File(laravelStorageFramework, "cache").mkdirs()
+            File(laravelStorageFramework, "sessions").mkdirs()
             Log.d(TAG, "✅ Created laravel/storage/framework for hot reload")
 
             // Create bootstrap/cache directory (required for Laravel's cache operations)
@@ -278,6 +320,20 @@ class LaravelEnvironment(private val context: Context) {
             Log.d(TAG, "✅ Created laravel/bootstrap/cache for Laravel cache operations")
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to extract Laravel zip", e)
+            return false
+        }
+
+        return true
+    }
+
+    private fun readBundledZipHash(): String? {
+        return try {
+            context.assets.open(BUNDLE_ZIP).use { input ->
+                calculateMD5(input)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Failed to compute bundled zip hash", e)
+            null
         }
     }
 
@@ -342,7 +398,7 @@ class LaravelEnvironment(private val context: Context) {
         // Use cached metadata instead of reading ZIP again
         return readBundleMetadata().version
     }
-    
+
     private fun checkAndApplyOTAUpdate(): Boolean {
         // Check if BIFROST_APP_ID exists in environment or app metadata
         val bifrostAppId = getBifrostAppId()
@@ -370,19 +426,19 @@ class LaravelEnvironment(private val context: Context) {
             Log.d(TAG, "ℹ️ DEBUG version detected, skipping OTA update")
             return false
         }
-        
+
         Log.d(TAG, "🔄 Checking for OTA updates...")
         Log.d(TAG, "📱 Current version: $currentVersion")
         Log.d(TAG, "🆔 Bifrost App ID: $bifrostAppId")
-        
+
         return try {
             val updateInfo = checkForUpdate(bifrostAppId, currentVersion)
             if (updateInfo != null && !updateInfo.optBoolean("upToDate", true)) {
                 val newVersion = updateInfo.optString("current_version", "")
                 val downloadUrl = updateInfo.optString("download_url", "")
-                
+
                 Log.d(TAG, "📥 Update available: $currentVersion → $newVersion")
-                
+
                 if (downloadUrl.isNotEmpty() && newVersion != currentVersion) {
                     return downloadAndApplyUpdate(downloadUrl, newVersion)
                 }
@@ -395,7 +451,7 @@ class LaravelEnvironment(private val context: Context) {
             false
         }
     }
-    
+
     private fun getVersionFromEnvFile(envFile: File): String? {
         return try {
             val envContent = envFile.readText()
@@ -406,12 +462,12 @@ class LaravelEnvironment(private val context: Context) {
             null
         }
     }
-    
+
     private fun getVersionFromBundledEnv(): String? {
         // Use cached metadata instead of reading ZIP again
         return readBundleMetadata().version
     }
-    
+
     private fun getBifrostAppId(): String? {
         // Use cached metadata instead of reading ZIP again
         val bifrostId = readBundleMetadata().bifrostAppId
@@ -424,7 +480,7 @@ class LaravelEnvironment(private val context: Context) {
 
         return bifrostId
     }
-    
+
     private fun getBifrostAppIdFromExtracted(): String? {
         // Read from extracted .env file
         val laravelDir = File(appStorageDir, DIR_LARAVEL)
@@ -450,18 +506,18 @@ class LaravelEnvironment(private val context: Context) {
         Log.d(TAG, "No BIFROST_APP_ID found in extracted .env")
         return null
     }
-    
+
     private fun checkForUpdate(appId: String, currentVersion: String): JSONObject? {
         return try {
             val url = URL("$BIFROST_API_BASE/$appId/ota?installed=$currentVersion")
             val connection = url.openConnection() as HttpURLConnection
-            
+
             connection.requestMethod = "GET"
             connection.connectTimeout = 10000
             connection.readTimeout = 10000
             connection.setRequestProperty("Accept", "application/json")
             connection.setRequestProperty("User-Agent", "NativePHP-Android/${android.os.Build.VERSION.RELEASE}")
-            
+
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
                 val response = connection.inputStream.bufferedReader().use { it.readText() }
@@ -475,10 +531,10 @@ class LaravelEnvironment(private val context: Context) {
             null
         }
     }
-    
+
     private fun downloadAndApplyUpdate(downloadUrl: String, newVersion: String): Boolean {
         val tempFile = File(context.cacheDir, "ota_update_$newVersion.zip")
-        
+
         return try {
             // Download the update
             Log.d(TAG, "📥 Downloading update from: $downloadUrl")
@@ -486,27 +542,27 @@ class LaravelEnvironment(private val context: Context) {
             val connection = url.openConnection() as HttpURLConnection
             connection.connectTimeout = 30000
             connection.readTimeout = 30000
-            
+
             connection.inputStream.use { input ->
                 FileOutputStream(tempFile).use { output ->
                     val buffer = ByteArray(8192)
                     var bytesRead: Int
                     var totalBytes = 0L
-                    
+
                     while (input.read(buffer).also { bytesRead = it } != -1) {
                         output.write(buffer, 0, bytesRead)
                         totalBytes += bytesRead
-                        
+
                         // Log progress every 1MB
                         if (totalBytes % (1024 * 1024) == 0L) {
                             Log.d(TAG, "📥 Downloaded ${totalBytes / (1024 * 1024)}MB...")
                         }
                     }
-                    
+
                     Log.d(TAG, "✅ Download complete: ${totalBytes / 1024}KB")
                 }
             }
-            
+
             // Apply the update
             val laravelDir = File(appStorageDir, DIR_LARAVEL)
 
@@ -528,7 +584,7 @@ class LaravelEnvironment(private val context: Context) {
             val envFile = File(laravelDir, ENV_FILE)
             if (envFile.exists()) {
                 var envContent = envFile.readText()
-                
+
                 // Update or add NATIVEPHP_APP_VERSION
                 if (envContent.contains(Regex("NATIVEPHP_APP_VERSION=.*"))) {
                     envContent = envContent.replace(
@@ -539,29 +595,29 @@ class LaravelEnvironment(private val context: Context) {
                     // Add it if not present
                     envContent += "\nNATIVEPHP_APP_VERSION=$newVersion"
                 }
-                
+
                 envFile.writeText(envContent)
                 Log.d(TAG, "✅ Updated NATIVEPHP_APP_VERSION to $newVersion in .env")
             }
-            
+
             // Write version marker file to prevent re-extraction of old bundle
             val otaMarkerFile = File(laravelDir, OTA_MARKER)
             otaMarkerFile.writeText(newVersion)
-            
+
             // Clean up
             tempFile.delete()
-            
+
             Log.d(TAG, "✅ OTA update applied successfully to version $newVersion")
             true
-            
+
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to download or apply OTA update", e)
-            
+
             // Clean up on failure
             if (tempFile.exists()) {
                 tempFile.delete()
             }
-            
+
             false
         }
     }
@@ -570,10 +626,7 @@ class LaravelEnvironment(private val context: Context) {
         val buffer = ByteArray(65536)  // 64KB buffer - optimized for modern flash storage
         val zis = ZipInputStream(BufferedInputStream(inputStream))
 
-        // Phase 1: Read all entries into memory (ZIP must be read sequentially)
-        val directories = mutableListOf<File>()
-        val fileDataList = mutableListOf<Pair<File, ByteArray>>()
-
+        // Stream each entry directly to disk to avoid OOM on large bundles
         var ze: ZipEntry? = zis.nextEntry
         while (ze != null) {
             // Skip storage directory - we use persisted_data/storage instead
@@ -587,35 +640,22 @@ class LaravelEnvironment(private val context: Context) {
             val file = File(destinationDir, ze.name)
 
             if (ze.isDirectory) {
-                directories.add(file)
+                file.mkdirs()
             } else {
-                // Read file data into memory
-                val outputStream = java.io.ByteArrayOutputStream()
-                var count: Int
-                while (zis.read(buffer).also { count = it } != -1) {
-                    outputStream.write(buffer, 0, count)
+                // Ensure parent directories exist
+                file.parentFile?.mkdirs()
+                // Stream directly to disk - no memory buffering
+                FileOutputStream(file).use { fos ->
+                    var count: Int
+                    while (zis.read(buffer).also { count = it } != -1) {
+                        fos.write(buffer, 0, count)
+                    }
                 }
-                fileDataList.add(file to outputStream.toByteArray())
             }
             zis.closeEntry()
             ze = zis.nextEntry
         }
         zis.close()
-
-        // Phase 2: Create all directories
-        directories.forEach { it.mkdirs() }
-
-        // Phase 3: Write files in parallel using coroutines
-        runBlocking {
-            fileDataList.map { (file, data) ->
-                async(Dispatchers.IO) {
-                    file.parentFile?.mkdirs()
-                    FileOutputStream(file).use { fos ->
-                        fos.write(data)
-                    }
-                }
-            }.awaitAll()
-        }
     }
 
     /**
@@ -680,7 +720,33 @@ class LaravelEnvironment(private val context: Context) {
         }
     }
 
-    private fun runBaseArtisanCommands() {
+    /**
+     * Initialize the persistent PHP engine (ZTS mode) once per process.
+     *
+     * Called AFTER artisan init commands complete (which run in LEGACY MODE).
+     * The engine stays alive for the entire app lifecycle. HTTP requests
+     * and worker threads share it via TSRM per-thread contexts.
+     */
+    private fun initPhpEngine() {
+        try {
+            val appBasePath = File(appStorageDir, DIR_LARAVEL).absolutePath
+            Log.i(TAG, "🚀 Initializing persistent PHP engine (appBasePath=$appBasePath)")
+
+            val ok = PhpSupervisorBridge.nativeEngineInit("", "", appBasePath)
+            if (ok) {
+                Log.i(TAG, "✅ PHP engine initialized successfully")
+            } else {
+                // Returns false if already initialized — that's fine
+                Log.w(TAG, "⚠️ PHP engine init returned false (may already be initialized)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Failed to initialize PHP engine: ${e.message}", e)
+            // Don't throw — fall back to legacy per-request init
+        }
+    }
+
+    private fun runBaseArtisanCommands(shouldRunMigrations: Boolean) {
+        val totalStart = System.currentTimeMillis()
         val dbFile = File(appStorageDir, "persisted_data/database/database.sqlite")
         if (!dbFile.exists()) {
             Log.d(TAG, "📄 Creating empty SQLite file: ${dbFile.absolutePath}")
@@ -689,11 +755,271 @@ class LaravelEnvironment(private val context: Context) {
             Log.d(TAG, "✅ SQLite file already exists: ${dbFile.absolutePath}")
         }
 
-        File(appStorageDir, "persisted_data/storage/app/public")
-        phpBridge.runArtisanCommand("optimize:clear")
-        phpBridge.runArtisanCommand("storage:unlink")
-        phpBridge.runArtisanCommand("storage:link")
-        phpBridge.runArtisanCommand("migrate --force")
+        File(appStorageDir, "persisted_data/storage/app/public").mkdirs()
+
+        // ── Direct file ops (replace artisan commands that boot Laravel) ──
+
+        // 1. optimize:clear — direct file deletions (~5ms vs 60s+)
+        var stepStart = System.currentTimeMillis()
+        clearOptimizeCache()
+        Log.i(TAG, "⏱️ [TIMING] clearOptimizeCache: ${System.currentTimeMillis() - stepStart}ms")
+
+        // 2. storage:unlink + storage:link — symlink ops (~1ms vs 4s+)
+        stepStart = System.currentTimeMillis()
+        relinkStorage()
+        Log.i(TAG, "⏱️ [TIMING] relinkStorage: ${System.currentTimeMillis() - stepStart}ms")
+
+        val migrationStateStamp = File(appStorageDir, "persisted_data/.nativephp_migration_state")
+        val legacyMigrationStamp = File(appStorageDir, "persisted_data/.nativephp_migrations_bootstrapped")
+        val expectedMigrationState = buildMigrationStateKey()
+        val currentMigrationState = migrationStateStamp.takeIf { it.exists() }?.readText()?.trim().orEmpty()
+        val migrationHistoryAvailable = hasMigrationHistory(dbFile)
+        val migrationsNeeded = shouldRunMigrations || currentMigrationState != expectedMigrationState || (legacyMigrationStamp.exists() && !migrationStateStamp.exists()) || !migrationHistoryAvailable
+        val allowBootMigrations = (System.getenv("NATIVEPHP_RUN_MIGRATIONS_ON_BOOT") ?: "true")
+            .equals("true", ignoreCase = true)
+
+        if (migrationsNeeded) {
+            if (allowBootMigrations) {
+                stepStart = System.currentTimeMillis()
+                Log.i(TAG, "⏱️ [TIMING] artisan 'migrate --force' starting (required for initial/load consistency)...")
+                val migrateOutput = phpBridge.runArtisanCommand("migrate --force")
+                Log.i(TAG, "📋 artisan 'migrate --force' output:\n$migrateOutput")
+                val migrationSucceeded = hasMigrationHistory(dbFile)
+                if (migrationSucceeded) {
+                    migrationStateStamp.parentFile?.mkdirs()
+                    migrationStateStamp.writeText(expectedMigrationState)
+                    legacyMigrationStamp.parentFile?.mkdirs()
+                    legacyMigrationStamp.writeText(System.currentTimeMillis().toString())
+                } else {
+                    Log.w(TAG, "⚠️ Migration command finished but migration history still missing; state stamp not updated")
+                }
+                Log.i(TAG, "⏱️ [TIMING] artisan 'migrate --force' completed in ${System.currentTimeMillis() - stepStart}ms")
+            } else {
+                Log.w(TAG, "⏱️ [TIMING] artisan 'migrate --force' deferred by env override (set NATIVEPHP_RUN_MIGRATIONS_ON_BOOT=true to enable)")
+            }
+        } else {
+            Log.i(TAG, "⏱️ [TIMING] artisan 'migrate --force' skipped (migration state unchanged and migrations table present)")
+        }
+
+        val totalTime = System.currentTimeMillis() - totalStart
+        Log.i(TAG, "⏱️ [TIMING] runBaseArtisanCommands TOTAL: ${totalTime}ms")
+    }
+
+    /**
+     * Direct file-system equivalent of `storage:unlink` + `storage:link`.
+     * Removes the old symlink (if any) and creates:
+     *   laravel/public/storage → ../../persisted_data/storage/app/public
+     */
+    private fun relinkStorage() {
+        val publicStorage = File(appStorageDir, "$DIR_LARAVEL/public/storage")
+        val target = File(appStorageDir, DIR_PUBLIC)
+
+        // storage:unlink — remove existing link or directory
+        val linkPath = publicStorage.toPath()
+        try {
+            if (java.nio.file.Files.isSymbolicLink(linkPath)) {
+                java.nio.file.Files.delete(linkPath)
+                Log.d(TAG, "🔗 Removed existing symlink: ${publicStorage.absolutePath}")
+            } else if (publicStorage.exists()) {
+                deleteRecursive(publicStorage)
+                Log.d(TAG, "🔗 Removed existing directory: ${publicStorage.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not remove old storage link: ${e.message}")
+        }
+
+        // storage:link — create symlink
+        try {
+            target.mkdirs() // Ensure target exists
+            java.nio.file.Files.createSymbolicLink(linkPath, target.toPath())
+            Log.d(TAG, "🔗 Created symlink: ${publicStorage.absolutePath} → ${target.absolutePath}")
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Symlink creation failed, falling back to copy: ${e.message}")
+            // Some Android devices/filesystems don't support symlinks — copy instead
+            try {
+                target.copyRecursively(publicStorage, overwrite = true)
+                Log.d(TAG, "🔗 Copied storage directory as fallback")
+            } catch (e2: Exception) {
+                Log.e(TAG, "❌ Failed to link or copy storage: ${e2.message}")
+            }
+        }
+    }
+
+    /**
+     * Direct file-system equivalent of `php artisan optimize:clear`.
+     * Deletes all cached config, routes, events, views, and general cache.
+     * This avoids booting Laravel 6+ times just to delete files.
+     */
+    private fun clearOptimizeCache() {
+        val laravelBase = File(appStorageDir, DIR_LARAVEL)
+        val bootstrapCache = File(laravelBase, "bootstrap/cache")
+        val frameworkBase = File(appStorageDir, DIR_FRAMEWORK)
+
+        // config:clear — delete cached config
+        deleteIfExists(File(bootstrapCache, "config.php"))
+
+        // route:clear — delete cached routes (Laravel uses routes-v7.php)
+        deleteIfExists(File(bootstrapCache, "routes-v7.php"))
+        deleteIfExists(File(bootstrapCache, "routes.php"))
+
+        // event:clear — delete cached events
+        deleteIfExists(File(bootstrapCache, "events.php"))
+
+        // compiled:clear — delete compiled class file and services cache
+        deleteIfExists(File(bootstrapCache, "compiled.php"))
+        deleteIfExists(File(bootstrapCache, "services.php"))
+        deleteIfExists(File(bootstrapCache, "packages.php"))
+
+        // view:clear — delete all compiled Blade views
+        val viewsDir = File(frameworkBase, "views")
+        if (viewsDir.exists()) {
+            val count = viewsDir.listFiles()?.count { it.delete() } ?: 0
+            Log.d(TAG, "🧹 Cleared $count compiled views from ${viewsDir.absolutePath}")
+        }
+
+        // cache:clear — delete file-based cache data
+        val cacheDataDir = File(frameworkBase, "cache/data")
+        if (cacheDataDir.exists()) {
+            deleteRecursive(cacheDataDir)
+            cacheDataDir.mkdirs() // Recreate empty directory
+            Log.d(TAG, "🧹 Cleared cache data from ${cacheDataDir.absolutePath}")
+        }
+
+        Log.d(TAG, "✅ optimize:clear equivalent completed via direct file ops")
+    }
+
+    private fun deleteIfExists(file: File) {
+        if (file.exists()) {
+            file.delete()
+            Log.d(TAG, "🧹 Deleted: ${file.name}")
+        }
+    }
+
+    private fun deleteRecursive(file: File) {
+        if (file.isDirectory) {
+            file.listFiles()?.forEach { deleteRecursive(it) }
+        }
+        file.delete()
+    }
+
+    private fun buildMigrationStateKey(): String {
+        val laravelDir = File(appStorageDir, DIR_LARAVEL)
+        val envVersion = getVersionFromEnvFile(File(laravelDir, ENV_FILE))
+            ?.trim()
+            ?.trim('"', '\'')
+            .orEmpty()
+
+        val migrationsDir = File(laravelDir, "database/migrations")
+        val migrationFingerprint = if (!migrationsDir.exists() || !migrationsDir.isDirectory) {
+            "no-migrations-dir"
+        } else {
+            migrationsDir.walkTopDown()
+                .filter { it.isFile && it.extension.equals("php", ignoreCase = true) }
+                .sortedBy { it.relativeTo(migrationsDir).path }
+                .joinToString("|") {
+                    val relativePath = it.relativeTo(migrationsDir).path
+                    "$relativePath:${it.length()}:${it.lastModified()}"
+                }
+        }
+
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(("$envVersion|$migrationFingerprint").toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+        return "v2:$digest"
+    }
+
+    private fun hasMigrationHistory(databaseFile: File): Boolean {
+        if (!databaseFile.exists()) {
+            return false
+        }
+
+        return try {
+            SQLiteDatabase.openDatabase(databaseFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                val hasMigrationsTable = db.rawQuery(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migrations' LIMIT 1",
+                    null
+                ).use { cursor ->
+                    cursor.moveToFirst()
+                }
+
+                if (!hasMigrationsTable) {
+                    return false
+                }
+
+                db.rawQuery("SELECT COUNT(*) FROM migrations", null).use { cursor ->
+                    if (!cursor.moveToFirst()) {
+                        return false
+                    }
+
+                    cursor.getInt(0) > 0
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not verify migration history; forcing migrate for safety", e)
+            false
+        }
+    }
+
+    /**
+     * Post-migration diagnostic: queries sqlite_master for ALL tables and writes
+     * the result to both Android logcat and the Laravel log file.
+     * This runs once per cold boot to help diagnose "no such table" errors.
+     */
+    private fun auditDatabaseTables(databaseFile: File) {
+        if (!databaseFile.exists()) {
+            Log.w(TAG, "\uD83D\uDD0D TABLE AUDIT: database file does not exist at ${databaseFile.absolutePath}")
+            return
+        }
+
+        try {
+            val tables = mutableListOf<String>()
+            val dbSizeBytes = databaseFile.length()
+
+            SQLiteDatabase.openDatabase(databaseFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { db ->
+                // Query all user tables (exclude sqlite_* internal tables)
+                db.rawQuery(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                    null
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        tables.add(cursor.getString(0))
+                    }
+                }
+            }
+
+            val auditMsg = buildString {
+                append("\n")
+                append("=" .repeat(60)).append("\n")
+                append("  SQLITE TABLE AUDIT — Cold Boot Diagnostic\n")
+                append("=" .repeat(60)).append("\n")
+                append("  DB path: ${databaseFile.absolutePath}\n")
+                append("  DB size: ${dbSizeBytes} bytes\n")
+                append("  Tables found: ${tables.size}\n")
+                append("-" .repeat(60)).append("\n")
+                if (tables.isEmpty()) {
+                    append("  ⚠️  NO TABLES FOUND — migrations may have failed silently\n")
+                } else {
+                    tables.forEachIndexed { idx, name ->
+                        append("  ${idx + 1}. $name\n")
+                    }
+                }
+                append("=" .repeat(60))
+            }
+
+            // Write to logcat
+            Log.i(TAG, auditMsg)
+
+            // Also write to Laravel log file so it's visible from `adb pull`
+            val logDir = File(appStorageDir, DIR_LOGS)
+            logDir.mkdirs()
+            val logFile = File(logDir, "laravel.log")
+            val timestamp = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+            logFile.appendText("[$timestamp] local.INFO: [NativePHP] TABLE AUDIT: ${tables.size} tables found: ${tables.joinToString(", ")} | DB: ${databaseFile.absolutePath} (${dbSizeBytes} bytes)\n")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "\uD83D\uDD0D TABLE AUDIT FAILED: ${e.message}", e)
+        }
     }
 
     private fun setupDirectories() {
@@ -710,6 +1036,13 @@ class LaravelEnvironment(private val context: Context) {
 
             // Set permissions on parent storage directory (owner-only)
             File(appStorageDir, DIR_STORAGE).setWritable(true, true)
+
+            // Ensure conventional Laravel paths also exist as fallback for config defaults
+            val laravelFramework = File(appStorageDir, "$DIR_LARAVEL/storage/framework")
+            File(laravelFramework, "views").mkdirs()
+            File(laravelFramework, "cache").mkdirs()
+            File(laravelFramework, "sessions").mkdirs()
+            File(appStorageDir, "$DIR_LARAVEL/bootstrap/cache").mkdirs()
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create directories", e)
@@ -760,7 +1093,8 @@ class LaravelEnvironment(private val context: Context) {
                 "CACHE_STORE" to "file",
                 "QUEUE_CONNECTION" to "sync",
                 "NATIVEPHP_PLATFORM" to "android",
-                "NATIVEPHP_TEMPDIR" to context.cacheDir.absolutePath
+                "NATIVEPHP_TEMPDIR" to context.cacheDir.absolutePath,
+                "NATIVEPHP_WORKER_MEMORY_LIMIT" to "512M"
             )
 
             setEnvironmentVariables(
@@ -830,12 +1164,9 @@ openssl.cafile="${context.filesDir.absolutePath}/$CACERT_FILE"
     }
 
     private fun generateAndSaveAppKey(file: File): String {
-        val result = phpBridge.runArtisanCommand("key:generate --show")
-        var generatedKey = result.trim()
-
-        if (!generatedKey.startsWith("base64:")) {
-            generatedKey = "base64:3a3I14QgnAhKUHROy1bn6A/UpTeELNI2flsl+Ud0bF4="
-        }
+        val keyBytes = ByteArray(32)
+        SecureRandom().nextBytes(keyBytes)
+        val generatedKey = "base64:${Base64.encodeToString(keyBytes, Base64.NO_WRAP)}"
 
         file.parentFile?.mkdirs()
         file.writeText(generatedKey)

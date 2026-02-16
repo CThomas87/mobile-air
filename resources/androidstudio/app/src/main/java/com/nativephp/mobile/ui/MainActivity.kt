@@ -21,6 +21,7 @@ import com.nativephp.mobile.utils.NativeActionCoordinator
 import com.nativephp.mobile.utils.WebViewProvider
 import com.nativephp.mobile.security.LaravelCookieStore
 import com.nativephp.mobile.lifecycle.NativePHPLifecycle
+import com.nativephp.mobile.worker.PhpWorkerService
 import java.io.File
 import java.net.URL
 import android.webkit.WebChromeClient
@@ -62,6 +63,7 @@ class MainActivity : FragmentActivity(), WebViewProvider {
     private var pendingDeepLink: String? = null
     private var hotReloadWatcherThread: Thread? = null
     private var shouldStopWatcher = false
+    @Volatile private var workerAutoStarted = false
     private var pendingInsets: Insets? = null
     private var showSplash by mutableStateOf(true)
 
@@ -154,6 +156,7 @@ class MainActivity : FragmentActivity(), WebViewProvider {
             // Start hot reload watcher AFTER Laravel environment is initialized
             startHotReloadWatcher()
             injectJavaScript(webView)
+
         }
 
         onBackPressedDispatcher.addCallback(this) {
@@ -237,14 +240,26 @@ class MainActivity : FragmentActivity(), WebViewProvider {
 
     private fun initializeEnvironmentAsync(onReady: () -> Unit) {
         Thread {
-            Log.d("LaravelInit", "📦 Starting async Laravel extraction...")
+            val startTime = System.currentTimeMillis()
+            Log.i("LaravelInit", "📦 Starting async Laravel extraction...")
             laravelEnv = LaravelEnvironment(this)
             laravelEnv.initialize()
 
-            Log.d("LaravelInit", "✅ Laravel environment ready — continuing")
+            val elapsed = System.currentTimeMillis() - startTime
+            Log.i("LaravelInit", "✅ Laravel environment ready in ${elapsed}ms — posting onReady to main thread")
 
             Handler(Looper.getMainLooper()).post {
-                onReady()
+                if (isFinishing || isDestroyed) {
+                    Log.w("LaravelInit", "⚠️ Activity no longer valid, skipping onReady callback")
+                    return@post
+                }
+                try {
+                    Log.i("LaravelInit", "🚀 Executing onReady callback (loading WebView URL)...")
+                    onReady()
+                    Log.i("LaravelInit", "✅ onReady callback completed — app should be visible now")
+                } catch (e: Exception) {
+                    Log.e("LaravelInit", "❌ onReady callback failed: ${e.message}", e)
+                }
             }
         }.start()
     }
@@ -416,6 +431,49 @@ class MainActivity : FragmentActivity(), WebViewProvider {
                     Log.e("Permission", "❌ Push notification permission denied")
                 }
             }
+        }
+    }
+
+    /**
+     * Called by WebViewManager after a page has finished rendering.
+     * We defer worker startup until first paint to avoid contention with
+     * the initial app request, which can otherwise lead to blank first screen.
+     */
+    fun onFirstPageRendered(url: String?) {
+        if (workerAutoStarted) {
+            return
+        }
+
+        val safeUrl = url ?: ""
+        if (safeUrl.isBlank() || safeUrl == "about:blank" || !safeUrl.startsWith("http://127.0.0.1")) {
+            return
+        }
+
+        workerAutoStarted = true
+        Log.i("WorkerAutoStart", "🖼️ First page rendered ($safeUrl), starting worker service")
+        autoStartWorkerService()
+    }
+
+    /**
+     * Auto-start the background worker/supervisor service.
+     *
+     * Reads auto_start config; if true, starts PhpWorkerService
+     * as a foreground service so queued jobs and the scheduler run.
+     */
+    private fun autoStartWorkerService() {
+        try {
+            val appStorageDir = getDir("storage", MODE_PRIVATE)
+            val appBasePath = File(appStorageDir, "laravel").absolutePath
+
+            Log.i("WorkerAutoStart", "🚀 Starting PhpWorkerService (appBasePath=$appBasePath)")
+
+            PhpWorkerService.start(
+                context = applicationContext,
+                appBasePath = appBasePath
+            )
+            Log.i("WorkerAutoStart", "✅ PhpWorkerService start requested")
+        } catch (e: Exception) {
+            Log.e("WorkerAutoStart", "❌ Failed to auto-start worker service: ${e.message}", e)
         }
     }
 

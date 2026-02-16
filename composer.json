@@ -81,7 +81,8 @@
     "extra": {
         "laravel": {
             "providers": [
-                "Native\\Mobile\\NativeServiceProvider"
+                "Native\\Mobile\\NativeServiceProvider",
+                "Native\\Mobile\\Worker\\WorkerServiceProvider"
             ]
         }
     },

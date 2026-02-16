@@ -5,6 +5,31 @@ use Illuminate\Http\Request;
 
 $_timing = ['start' => microtime(true)];
 
+$storagePath = $_SERVER['LARAVEL_STORAGE_PATH'] ?? null;
+if (!$storagePath) {
+    $storagePath = dirname(__DIR__, 3).'/storage';
+}
+$nativePhpLogFile = rtrim($storagePath, '/').'/logs/native-http-bootstrap.log';
+$nativePhpLog = static function (string $message) use ($nativePhpLogFile): void {
+    @error_log(date('c').' '.$message.PHP_EOL, 3, $nativePhpLogFile);
+};
+
+$maxExecutionSeconds = (int) (getenv('NATIVEPHP_HTTP_MAX_EXECUTION_SECONDS') ?: '0');
+if ($maxExecutionSeconds > 0) {
+    @ini_set('max_execution_time', (string) $maxExecutionSeconds);
+    @set_time_limit($maxExecutionSeconds);
+} else {
+    @ini_set('max_execution_time', '0');
+    @set_time_limit(0);
+}
+
+$defaultSocketTimeout = (int) (getenv('NATIVEPHP_DEFAULT_SOCKET_TIMEOUT_SECONDS') ?: '10');
+if ($defaultSocketTimeout > 0) {
+    @ini_set('default_socket_timeout', (string) $defaultSocketTimeout);
+}
+
+$nativePhpLog('stage=bootstrap_start max_execution='.$maxExecutionSeconds.' socket_timeout='.$defaultSocketTimeout.' uri='.($_SERVER['REQUEST_URI'] ?? '(null)'));
+
 // Capture OPcache status early (will be logged later with timing)
 $_opcacheInfo = 'unknown';
 if (function_exists('opcache_get_status')) {
@@ -71,16 +96,34 @@ $kernel = $app->make(Kernel::class);
 $_timing['kernel'] = microtime(true);
 
 try {
+    $nativePhpLog('stage=request_capture_start');
+    error_log('PerfTiming: PHP stage=request_capture_start');
     $request = Request::capture();
     $_timing['capture'] = microtime(true);
 
+    $nativePhpLog('stage=kernel_bootstrap_start');
+    error_log('PerfTiming: PHP stage=kernel_bootstrap_start');
     $kernel->bootstrap();
     $_timing['kernel_bootstrap'] = microtime(true);
 
+    $nativePhpLog('stage=handle_start');
+    error_log('PerfTiming: PHP stage=handle_start');
     $response = $kernel->handle($request);
     $_timing['handle'] = microtime(true);
 
-    $kernel->terminate($request, $response);
+    $shouldTerminate = filter_var(
+        getenv('NATIVEPHP_HTTP_TERMINATE') ?: 'false',
+        FILTER_VALIDATE_BOOLEAN
+    );
+
+    if ($shouldTerminate) {
+        $nativePhpLog('stage=terminate_start enabled=true');
+        error_log('PerfTiming: PHP stage=terminate_start enabled=true');
+        $kernel->terminate($request, $response);
+    } else {
+        $nativePhpLog('stage=terminate_skipped enabled=false');
+        error_log('PerfTiming: PHP stage=terminate_skipped enabled=false');
+    }
     $_timing['terminate'] = microtime(true);
 
     // Calculate timing breakdown (in ms)
@@ -94,6 +137,7 @@ try {
     $totalMs = round(($_timing['terminate'] - $_timing['start']) * 1000, 1);
 
     // Log timing via error_log (shows in logcat)
+    $nativePhpLog("stage=timing_summary opcache={$_opcacheInfo} autoload={$autoloadMs}ms bootstrap={$bootstrapMs}ms kernel={$kernelMs}ms capture={$captureMs}ms kernel_boot={$kernelBootMs}ms handle={$handleMs}ms terminate={$terminateMs}ms total={$totalMs}ms");
     error_log("PerfTiming: PHP opcache={$_opcacheInfo} autoload={$autoloadMs}ms bootstrap={$bootstrapMs}ms kernel={$kernelMs}ms capture={$captureMs}ms kernel_boot={$kernelBootMs}ms handle={$handleMs}ms terminate={$terminateMs}ms TOTAL={$totalMs}ms");
 
     // Send headers and body manually (for your bridge)
@@ -114,7 +158,11 @@ try {
     $response->sendContent();
 
 } catch (Throwable $e) {
-    echo 'DEBUG: Request handling error: '.$e->getMessage()."\n";
-    echo 'DEBUG: Error type: '.get_class($e)."\n";
-    echo "DEBUG: Trace:\n".$e->getTraceAsString()."\n";
+    $errorId = uniqid('nativephp_', true);
+    $nativePhpLog('stage=exception id='.$errorId.' type='.get_class($e).' message='.$e->getMessage());
+    $nativePhpLog('stage=exception_trace id='.$errorId.' trace='.$e->getTraceAsString());
+
+    echo "HTTP/1.1 500 Internal Server Error\r\n";
+    echo "Content-Type: text/html; charset=UTF-8\r\n\r\n";
+    echo "<html><body><h2>Application error</h2><p>Reference: {$errorId}</p></body></html>";
 }

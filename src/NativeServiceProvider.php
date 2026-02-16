@@ -26,6 +26,7 @@ use Native\Mobile\Commands\TailCommand;
 use Native\Mobile\Commands\VersionCommand;
 use Native\Mobile\Commands\JumpCommand;
 use Native\Mobile\Commands\WatchCommand;
+use Native\Mobile\Commands\WorkerCommand;
 use Native\Mobile\Edge\NativeTagPrecompiler;
 use Native\Mobile\Http\Middleware\RenderEdgeComponents;
 use Native\Mobile\Support\Ios\PhpUrlGenerator;
@@ -63,6 +64,7 @@ class NativeServiceProvider extends PackageServiceProvider
                 PluginRegisterCommand::class,
                 PluginUninstallCommand::class,
                 PluginValidateCommand::class,
+                WorkerCommand::class,
             ]);
     }
 

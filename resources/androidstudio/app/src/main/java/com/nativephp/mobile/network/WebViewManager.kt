@@ -323,6 +323,8 @@ class WebViewManager(
                 super.onPageFinished(view, url)
                 Log.d(TAG, "✅ Page finished loading: $url")
 
+                (context as? MainActivity)?.onFirstPageRendered(url)
+
                 // Inject safe area insets again to ensure they're set
                 (context as? MainActivity)?.injectSafeAreaInsetsToWebView()
 

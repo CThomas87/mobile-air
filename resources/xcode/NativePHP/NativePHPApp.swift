@@ -6,6 +6,22 @@ import UIKit
 
 var output = ""
 
+private func currentEnv(_ key: String) -> String? {
+    guard let value = getenv(key) else {
+        return nil
+    }
+
+    return String(cString: value)
+}
+
+private func restoreEnv(_ key: String, _ previousValue: String?) {
+    if let previousValue {
+        setenv(key, previousValue, 1)
+    } else {
+        unsetenv(key)
+    }
+}
+
 @_cdecl("pipe_php_output")
 public func pipe_php_output(_ cString: UnsafePointer<CChar>?) {
     guard let cString = cString else { return }
@@ -49,6 +65,12 @@ struct NativePHPApp: App {
         // 3. Create storage symlink
         DebugLogger.shared.log("📱 Deferred init: creating storage symlink")
         createStorageLink()
+
+        BackgroundTaskManager.shared.appBasePath = AppUpdateManager.shared.getAppPath()
+        BackgroundTaskManager.shared.iniPath = createPhpIni()
+        BackgroundTaskManager.shared.workerCount = 1
+        BackgroundTaskManager.shared.queues = "default"
+        BackgroundTaskManager.shared.connection = "database"
 
         // 4. Execute plugin initialization callbacks (on main thread)
         DispatchQueue.main.async {
@@ -271,6 +293,12 @@ struct NativePHPApp: App {
             uri += "?" + query
         }
 
+        let previousConsoleMode = currentEnv("APP_RUNNING_IN_CONSOLE")
+        let previousJobType = currentEnv("NATIVEPHP_JOB_TYPE")
+
+        setenv("APP_RUNNING_IN_CONSOLE", "false", 1)
+        setenv("NATIVEPHP_JOB_TYPE", "http", 1)
+
         setenv("REMOTE_ADDR", "0.0.0.0", 1)
         setenv("REQUEST_URI", uri, 1)
         setenv("QUERY_STRING", request.query, 1);
@@ -314,6 +342,9 @@ struct NativePHPApp: App {
 
             // Equivalent to PHP_EMBED_END_BLOCK
             php_embed_shutdown()
+
+            restoreEnv("APP_RUNNING_IN_CONSOLE", previousConsoleMode)
+            restoreEnv("NATIVEPHP_JOB_TYPE", previousJobType)
 
             // Clean up env variables for headers
             for key in envKeys {
@@ -440,8 +471,12 @@ struct NativePHPApp: App {
             strdup("php")
         ]
 
+        let previousConsoleMode = currentEnv("APP_RUNNING_IN_CONSOLE")
+        let previousJobType = currentEnv("NATIVEPHP_JOB_TYPE")
+
         setenv("PHP_SELF", "artisan.php", 1)
         setenv("APP_RUNNING_IN_CONSOLE", "true", 1)
+        setenv("NATIVEPHP_JOB_TYPE", "queue", 1)
 
         let additionalCArgs = additionalArgs.map { strdup($0) }
         argv.append(contentsOf: additionalCArgs)
@@ -461,6 +496,9 @@ struct NativePHPApp: App {
 
             php_embed_shutdown()
         }
+
+        restoreEnv("APP_RUNNING_IN_CONSOLE", previousConsoleMode)
+        restoreEnv("NATIVEPHP_JOB_TYPE", previousJobType)
 
         argv.forEach { free($0) }
 

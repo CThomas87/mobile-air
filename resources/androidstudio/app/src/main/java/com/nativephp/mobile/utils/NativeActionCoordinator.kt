@@ -103,7 +103,7 @@ class NativeActionCoordinator : Fragment() {
                 ?: NativeActionCoordinator().also {
                     activity.supportFragmentManager.beginTransaction()
                         .add(it, "NativeActionCoordinator")
-                        .commitNow()
+                        .commitNowAllowingStateLoss()
                 }
 
         /**

@@ -2,7 +2,7 @@ name: Test Package Installation
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   test-package:
@@ -10,394 +10,399 @@ jobs:
     timeout-minutes: 30
     container:
       image: mobiledevops/android-sdk-image:34.0.1
-    
+
     steps:
-    - name: Checkout mobile package
-      uses: actions/checkout@v4
+      - name: Checkout mobile package
+        uses: actions/checkout@v4
 
-    - name: Cache PHP packages
-      uses: actions/cache@v4
-      with:
-        path: |
-          /var/cache/apt
-          /var/lib/apt
-        key: ${{ runner.os }}-apt-packages-php8.3-${{ hashFiles('.github/workflows/test-package.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-apt-packages-php8.3-
-          ${{ runner.os }}-apt-packages-
+      - name: Cache PHP packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt
+            /var/lib/apt
+          key: ${{ runner.os }}-apt-packages-php8.3-${{ hashFiles('.github/workflows/test-package.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-packages-php8.3-
+            ${{ runner.os }}-apt-packages-
 
-    - name: Cache Composer
-      uses: actions/cache@v4
-      with:
-        path: |
-          /root/.composer/cache
-          /tmp/.composer-cache
-        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock', '**/composer.json') }}
-        restore-keys: |
-          ${{ runner.os }}-composer-
+      - name: Cache Composer
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.composer/cache
+            /tmp/.composer-cache
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock', '**/composer.json') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
 
-    - name: Install PHP 8.3 and dependencies
-      run: |
-        # Update package lists
-        apt-get update
-        
-        # Install software-properties-common for add-apt-repository
-        apt-get install -y software-properties-common
-        
-        # Add PHP 8.3 repository
-        add-apt-repository ppa:ondrej/php -y
-        apt-get update
-        
-        # Install PHP 8.3 and required extensions (including zip for bundle creation)
-        apt-get install -y php8.3 php8.3-cli php8.3-curl php8.3-xml php8.3-zip php8.3-mbstring php8.3-intl php8.3-bcmath zip unzip rsync
-        
-        # Install Composer
-        curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-        
-        # Verify installations
-        php --version
-        composer --version
+      - name: Install PHP 8.3 and dependencies
+        run: |
+          # Update package lists
+          apt-get update
 
-    - name: Cache Laravel project template
-      uses: actions/cache@v4
-      with:
-        path: /tmp/laravel-template
-        key: ${{ runner.os }}-laravel-template-${{ hashFiles('.github/workflows/test-package.yml') }}
-        restore-keys: |
-          ${{ runner.os }}-laravel-template-
+          # Install software-properties-common for add-apt-repository
+          apt-get install -y software-properties-common
 
-    - name: Create fresh Laravel project
-      run: |
-        cd /tmp
-        
-        # Use cached Laravel template if available
-        if [ -d "/tmp/laravel-template" ] && [ "$(ls -A /tmp/laravel-template)" ]; then
-          cp -r /tmp/laravel-template test-app
-        else
-          composer create-project laravel/laravel test-app --prefer-dist --no-interaction
-          cp -r test-app /tmp/laravel-template
-        fi
-        
-        cd test-app
-        
-        # Set proper permissions
-        chmod -R 755 storage bootstrap/cache
+          # Add PHP 8.3 repository
+          add-apt-repository ppa:ondrej/php -y
+          apt-get update
 
-    - name: Find checkout location
-      run: |
-        echo "=== Finding checkout location ==="
-        echo "Current working directory: $(pwd)"
-        echo "GITHUB_WORKSPACE env var: ${GITHUB_WORKSPACE:-not set}"
-        echo "Contents of current directory:"
-        ls -la .
-        echo "Looking for composer.json files:"
-        find / -name "composer.json" -type f 2>/dev/null | grep -v "/tmp" | head -10
+          # Install PHP 8.3 and required extensions (including zip for bundle creation)
+          apt-get install -y php8.3 php8.3-cli php8.3-curl php8.3-xml php8.3-zip php8.3-mbstring php8.3-intl php8.3-bcmath zip unzip rsync
 
-    - name: Install mobile package from current branch
-      run: |
-        cd /tmp/test-app
-        
-        # Use the GITHUB_WORKSPACE environment variable or current working directory
-        MOBILE_PACKAGE_PATH="${GITHUB_WORKSPACE:-/github/workspace}"
-        
-        # If that doesn't exist, try to find it
-        if [ ! -f "$MOBILE_PACKAGE_PATH/composer.json" ]; then
-          echo "Trying alternate paths..."
-          
-          # Check common locations
-          for path in "/github/workspace" "/__w/mobile/mobile" "/workspace" "." "/app"; do
-            if [ -f "$path/composer.json" ]; then
-              MOBILE_PACKAGE_PATH="$path"
-              echo "Found mobile package at: $MOBILE_PACKAGE_PATH"
-              break
+          # Install Composer
+          curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+          # Verify installations
+          php --version
+          composer --version
+
+      - name: Verify shipped PHP is ZTS-enabled
+        run: |
+          chmod +x scripts/verify_zts.sh
+          ./scripts/verify_zts.sh android
+
+      - name: Cache Laravel project template
+        uses: actions/cache@v4
+        with:
+          path: /tmp/laravel-template
+          key: ${{ runner.os }}-laravel-template-${{ hashFiles('.github/workflows/test-package.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-laravel-template-
+
+      - name: Create fresh Laravel project
+        run: |
+          cd /tmp
+
+          # Use cached Laravel template if available
+          if [ -d "/tmp/laravel-template" ] && [ "$(ls -A /tmp/laravel-template)" ]; then
+            cp -r /tmp/laravel-template test-app
+          else
+            composer create-project laravel/laravel test-app --prefer-dist --no-interaction
+            cp -r test-app /tmp/laravel-template
+          fi
+
+          cd test-app
+
+          # Set proper permissions
+          chmod -R 755 storage bootstrap/cache
+
+      - name: Find checkout location
+        run: |
+          echo "=== Finding checkout location ==="
+          echo "Current working directory: $(pwd)"
+          echo "GITHUB_WORKSPACE env var: ${GITHUB_WORKSPACE:-not set}"
+          echo "Contents of current directory:"
+          ls -la .
+          echo "Looking for composer.json files:"
+          find / -name "composer.json" -type f 2>/dev/null | grep -v "/tmp" | head -10
+
+      - name: Install mobile package from current branch
+        run: |
+          cd /tmp/test-app
+
+          # Use the GITHUB_WORKSPACE environment variable or current working directory
+          MOBILE_PACKAGE_PATH="${GITHUB_WORKSPACE:-/github/workspace}"
+
+          # If that doesn't exist, try to find it
+          if [ ! -f "$MOBILE_PACKAGE_PATH/composer.json" ]; then
+            echo "Trying alternate paths..."
+            
+            # Check common locations
+            for path in "/github/workspace" "/__w/mobile/mobile" "/workspace" "." "/app"; do
+              if [ -f "$path/composer.json" ]; then
+                MOBILE_PACKAGE_PATH="$path"
+                echo "Found mobile package at: $MOBILE_PACKAGE_PATH"
+                break
+              fi
+            done
+          fi
+
+          echo "=== Using mobile package path: $MOBILE_PACKAGE_PATH ==="
+          ls -la "$MOBILE_PACKAGE_PATH"
+
+          # Verify composer.json exists
+          if [ ! -f "$MOBILE_PACKAGE_PATH/composer.json" ]; then
+            echo "ERROR: Still cannot find composer.json"
+            exit 1
+          fi
+
+          # Add local package repository
+          composer config repositories.mobile-package path "$MOBILE_PACKAGE_PATH"
+
+          # Install the package
+          composer require nativephp/mobile:@dev --no-interaction
+
+      - name: Set environment variables
+        run: |
+          cd /tmp/test-app
+
+          # Add required environment variables to .env
+          echo "NATIVEPHP_APP_ID=com.example.test" >> .env
+          echo "NATIVEPHP_APP_VERSION=1.0.0" >> .env
+
+          # Display .env for debugging
+          echo "=== Environment Configuration ==="
+          cat .env
+
+      - name: Test native:install command
+        run: |
+          cd /tmp/test-app
+
+          echo "=== Testing native:install android ==="
+          php artisan native:install android --force --without-icu --no-interaction
+
+          echo "=== Verifying Android project structure ==="
+          ls -la nativephp/
+          ls -la nativephp/android/
+
+          # Check for key files
+          if [ ! -f "nativephp/android/gradlew" ]; then
+            echo "ERROR: gradlew not found"
+            exit 1
+          fi
+
+          if [ ! -f "nativephp/android/app/build.gradle.kts" ]; then
+            echo "ERROR: build.gradle.kts not found"
+            exit 1
+          fi
+
+          echo "✅ Android project structure created successfully"
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            ~/.gradle/caches/modules-*
+            ~/.gradle/daemon
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Setup signing keystore
+        run: |
+          cd /tmp/test-app
+
+          echo "🔐 Setting up signing keystore for signed builds..."
+
+          # Decode keystore from base64 and save to Android project
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > nativephp/android/app-keystore.jks
+
+          # Set up gradle properties for signing
+          cd nativephp/android
+          echo "MYAPP_UPLOAD_STORE_FILE=$(pwd)/app-keystore.jks" >> local.properties
+          echo "MYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> local.properties
+          echo "MYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> local.properties
+          echo "MYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> local.properties
+
+          echo "✅ Signing keystore configured successfully"
+
+      #    - name: Test unsigned release APK build via native:run
+      #      run: |
+      #        cd /tmp/test-app
+      #
+      #        echo "=== Testing native:run android --build=release (unsigned) ==="
+      #
+      #        # This should:
+      #        # 1. Update Android configuration (including version placeholders)
+      #        # 2. Create Laravel bundle
+      #        # 3. Build release APK
+      #        # 4. Should fail at device install stage (which is expected)
+      #        set +e  # Don't exit on error since device install will fail
+      #        timeout 900 php artisan native:run android --build=release --no-tty 2>&1 | tee release-build.log
+      #        BUILD_EXIT_CODE=$?
+      #        set -e
+      #
+      #        echo "=== Build log output ==="
+      #        tail -20 release-build.log
+      #
+      #        echo "=== Checking for infinite recursion errors ==="
+      #        if grep -q "nativephp/android/laravel/nativephp/android/laravel" release-build.log; then
+      #          echo "❌ ERROR: Infinite recursion detected in paths!"
+      #          echo "Found problematic paths:"
+      #          grep "nativephp/android/laravel/nativephp/android/laravel" release-build.log
+      #          exit 1
+      #        else
+      #          echo "✅ No infinite recursion detected"
+      #        fi
+      #
+      #        echo "=== Checking Laravel bundle creation ==="
+      #        if [ -f "nativephp/android/app/src/main/assets/laravel_bundle.zip" ]; then
+      #          BUNDLE_SIZE=$(stat -c%s "nativephp/android/app/src/main/assets/laravel_bundle.zip")
+      #          echo "✅ Laravel bundle found - Size: $BUNDLE_SIZE bytes"
+      #
+      #          if [ "$BUNDLE_SIZE" -eq 0 ]; then
+      #            echo "❌ ERROR: Laravel bundle is 0 bytes"
+      #            exit 1
+      #          fi
+      #        else
+      #          echo "❌ ERROR: Laravel bundle not found!"
+      #          exit 1
+      #        fi
+      #
+      #        echo "=== Verifying APK build output ==="
+      #        find nativephp/android/app/build/outputs -name "*.apk" -type f | head -5
+      #
+      #        # Check if APK was created
+      #        if find nativephp/android/app/build/outputs -name "*.apk" -type f | grep -q .; then
+      #          echo "✅ Release APK build successful"
+      #          APK_FILE=$(find nativephp/android/app/build/outputs -name "*.apk" -type f | head -1)
+      #          APK_SIZE=$(stat -c%s "$APK_FILE")
+      #          echo "APK file: $APK_FILE"
+      #          echo "APK size: $APK_SIZE bytes"
+      #        else
+      #          echo "❌ No APK files found"
+      #          exit 1
+      #        fi
+      #
+      #    - name: Test unsigned bundle AAB build via native:run
+      #      run: |
+      #        cd /tmp/test-app
+      #
+      #        echo "=== Testing native:run android --build=bundle (unsigned) ==="
+      #
+      #        # Clean previous build
+      #        rm -rf nativephp/android/app/build/outputs/bundle || true
+      #
+      #        # This should create an AAB bundle
+      #        set +e  # Don't exit on error since device install will fail
+      #        timeout 900 php artisan native:run android --build=bundle --no-tty 2>&1 | tee bundle-build.log
+      #        BUILD_EXIT_CODE=$?
+      #        set -e
+      #
+      #        echo "=== Build log output ==="
+      #        tail -50 bundle-build.log
+      #
+      #        echo "=== Verifying AAB build output ==="
+      #        find nativephp/android/app/build/outputs -name "*.aab" -type f | head -5
+      #
+      #        # Check if AAB was created
+      #        if find nativephp/android/app/build/outputs -name "*.aab" -type f | grep -q .; then
+      #          echo "✅ Bundle AAB build successful"
+      #          AAB_FILE=$(find nativephp/android/app/build/outputs -name "*.aab" -type f | head -1)
+      #          AAB_SIZE=$(stat -c%s "$AAB_FILE")
+      #          echo "AAB file: $AAB_FILE"
+      #          echo "AAB size: $AAB_SIZE bytes"
+      #        else
+      #          echo "❌ No AAB files found"
+      #          exit 1
+      #        fi
+      #
+
+      - name: Test signed AAB build via native:package
+        run: |
+          cd /tmp/test-app
+
+          echo "=== Testing native:package android --build-type=bundle (signed) ==="
+
+          # Clean previous build
+          rm -rf nativephp/android/app/build/outputs/bundle || true
+
+          # This should create a signed AAB using the keystore
+          set +e  # Don't exit on error
+          timeout 900 php artisan native:package android --build-type=bundle --keystore=/tmp/test-app/nativephp/android/app-keystore.jks --keystore-password="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" --key-alias="${{ secrets.ANDROID_KEY_ALIAS }}" --key-password="${{ secrets.ANDROID_KEY_PASSWORD }}" --no-tty 2>&1 | tee signed-bundle-build.log
+          BUILD_EXIT_CODE=$?
+          set -e
+
+          echo "=== Signed build log output ==="
+          tail -20 signed-bundle-build.log
+
+          echo "=== Verifying signed AAB build output ==="
+          find nativephp/android/app/build/outputs -name "*.aab" -type f | head -5
+
+          # Check if signed AAB was created
+          if find nativephp/android/app/build/outputs -name "*.aab" -type f | grep -q .; then
+            echo "✅ Signed bundle AAB build successful"
+            AAB_FILE=$(find nativephp/android/app/build/outputs -name "*.aab" -type f | head -1)
+            AAB_SIZE=$(stat -c%s "$AAB_FILE")
+            echo "Signed AAB file: $AAB_FILE"
+            echo "Signed AAB size: $AAB_SIZE bytes"
+          else
+            echo "❌ No signed AAB files found"
+            exit 1
+          fi
+
+      - name: Validate project structure
+        run: |
+          cd /tmp/test-app
+
+          echo "=== Validating Android project structure ==="
+
+          # Check key directories exist
+          for dir in "nativephp/android/app/src/main/java" "nativephp/android/app/src/main/assets" "nativephp/android/app/src/main/cpp"; do
+            if [ -d "$dir" ]; then
+              echo "✅ Directory exists: $dir"
+            else
+              echo "❌ Missing directory: $dir"
+              exit 1
             fi
           done
-        fi
-        
-        echo "=== Using mobile package path: $MOBILE_PACKAGE_PATH ==="
-        ls -la "$MOBILE_PACKAGE_PATH"
-        
-        # Verify composer.json exists
-        if [ ! -f "$MOBILE_PACKAGE_PATH/composer.json" ]; then
-          echo "ERROR: Still cannot find composer.json"
-          exit 1
-        fi
-        
-        # Add local package repository
-        composer config repositories.mobile-package path "$MOBILE_PACKAGE_PATH"
-        
-        # Install the package
-        composer require nativephp/mobile:@dev --no-interaction
 
-    - name: Set environment variables
-      run: |
-        cd /tmp/test-app
-        
-        # Add required environment variables to .env
-        echo "NATIVEPHP_APP_ID=com.example.test" >> .env
-        echo "NATIVEPHP_APP_VERSION=1.0.0" >> .env
-        
-        # Display .env for debugging
-        echo "=== Environment Configuration ==="
-        cat .env
+          # Check key files exist
+          for file in "nativephp/android/gradlew" "nativephp/android/app/build.gradle.kts" "nativephp/android/app/src/main/AndroidManifest.xml"; do
+            if [ -f "$file" ]; then
+              echo "✅ File exists: $file"
+            else
+              echo "❌ Missing file: $file"
+              exit 1
+            fi
+          done
 
-    - name: Test native:install command
-      run: |
-        cd /tmp/test-app
-        
-        echo "=== Testing native:install android ==="
-        php artisan native:install android --force --without-icu --no-interaction
-        
-        echo "=== Verifying Android project structure ==="
-        ls -la nativephp/
-        ls -la nativephp/android/
-        
-        # Check for key files
-        if [ ! -f "nativephp/android/gradlew" ]; then
-          echo "ERROR: gradlew not found"
-          exit 1
-        fi
-        
-        if [ ! -f "nativephp/android/app/build.gradle.kts" ]; then
-          echo "ERROR: build.gradle.kts not found"
-          exit 1
-        fi
-        
-        echo "✅ Android project structure created successfully"
-
-    - name: Cache Gradle dependencies
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.gradle/wrapper
-          ~/.gradle/caches/modules-*
-          ~/.gradle/daemon
-        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-        restore-keys: |
-          ${{ runner.os }}-gradle-
-
-    - name: Setup signing keystore
-      run: |
-        cd /tmp/test-app
-        
-        echo "🔐 Setting up signing keystore for signed builds..."
-        
-        # Decode keystore from base64 and save to Android project
-        echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > nativephp/android/app-keystore.jks
-        
-        # Set up gradle properties for signing
-        cd nativephp/android
-        echo "MYAPP_UPLOAD_STORE_FILE=$(pwd)/app-keystore.jks" >> local.properties
-        echo "MYAPP_UPLOAD_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> local.properties
-        echo "MYAPP_UPLOAD_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> local.properties
-        echo "MYAPP_UPLOAD_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> local.properties
-        
-        echo "✅ Signing keystore configured successfully"
-
-#    - name: Test unsigned release APK build via native:run
-#      run: |
-#        cd /tmp/test-app
-#
-#        echo "=== Testing native:run android --build=release (unsigned) ==="
-#
-#        # This should:
-#        # 1. Update Android configuration (including version placeholders)
-#        # 2. Create Laravel bundle
-#        # 3. Build release APK
-#        # 4. Should fail at device install stage (which is expected)
-#        set +e  # Don't exit on error since device install will fail
-#        timeout 900 php artisan native:run android --build=release --no-tty 2>&1 | tee release-build.log
-#        BUILD_EXIT_CODE=$?
-#        set -e
-#
-#        echo "=== Build log output ==="
-#        tail -20 release-build.log
-#
-#        echo "=== Checking for infinite recursion errors ==="
-#        if grep -q "nativephp/android/laravel/nativephp/android/laravel" release-build.log; then
-#          echo "❌ ERROR: Infinite recursion detected in paths!"
-#          echo "Found problematic paths:"
-#          grep "nativephp/android/laravel/nativephp/android/laravel" release-build.log
-#          exit 1
-#        else
-#          echo "✅ No infinite recursion detected"
-#        fi
-#
-#        echo "=== Checking Laravel bundle creation ==="
-#        if [ -f "nativephp/android/app/src/main/assets/laravel_bundle.zip" ]; then
-#          BUNDLE_SIZE=$(stat -c%s "nativephp/android/app/src/main/assets/laravel_bundle.zip")
-#          echo "✅ Laravel bundle found - Size: $BUNDLE_SIZE bytes"
-#
-#          if [ "$BUNDLE_SIZE" -eq 0 ]; then
-#            echo "❌ ERROR: Laravel bundle is 0 bytes"
-#            exit 1
-#          fi
-#        else
-#          echo "❌ ERROR: Laravel bundle not found!"
-#          exit 1
-#        fi
-#
-#        echo "=== Verifying APK build output ==="
-#        find nativephp/android/app/build/outputs -name "*.apk" -type f | head -5
-#
-#        # Check if APK was created
-#        if find nativephp/android/app/build/outputs -name "*.apk" -type f | grep -q .; then
-#          echo "✅ Release APK build successful"
-#          APK_FILE=$(find nativephp/android/app/build/outputs -name "*.apk" -type f | head -1)
-#          APK_SIZE=$(stat -c%s "$APK_FILE")
-#          echo "APK file: $APK_FILE"
-#          echo "APK size: $APK_SIZE bytes"
-#        else
-#          echo "❌ No APK files found"
-#          exit 1
-#        fi
-#
-#    - name: Test unsigned bundle AAB build via native:run
-#      run: |
-#        cd /tmp/test-app
-#
-#        echo "=== Testing native:run android --build=bundle (unsigned) ==="
-#
-#        # Clean previous build
-#        rm -rf nativephp/android/app/build/outputs/bundle || true
-#
-#        # This should create an AAB bundle
-#        set +e  # Don't exit on error since device install will fail
-#        timeout 900 php artisan native:run android --build=bundle --no-tty 2>&1 | tee bundle-build.log
-#        BUILD_EXIT_CODE=$?
-#        set -e
-#
-#        echo "=== Build log output ==="
-#        tail -50 bundle-build.log
-#
-#        echo "=== Verifying AAB build output ==="
-#        find nativephp/android/app/build/outputs -name "*.aab" -type f | head -5
-#
-#        # Check if AAB was created
-#        if find nativephp/android/app/build/outputs -name "*.aab" -type f | grep -q .; then
-#          echo "✅ Bundle AAB build successful"
-#          AAB_FILE=$(find nativephp/android/app/build/outputs -name "*.aab" -type f | head -1)
-#          AAB_SIZE=$(stat -c%s "$AAB_FILE")
-#          echo "AAB file: $AAB_FILE"
-#          echo "AAB size: $AAB_SIZE bytes"
-#        else
-#          echo "❌ No AAB files found"
-#          exit 1
-#        fi
-#
-
-    - name: Test signed AAB build via native:package
-      run: |
-        cd /tmp/test-app
-        
-        echo "=== Testing native:package android --build-type=bundle (signed) ==="
-        
-        # Clean previous build
-        rm -rf nativephp/android/app/build/outputs/bundle || true
-        
-        # This should create a signed AAB using the keystore
-        set +e  # Don't exit on error
-        timeout 900 php artisan native:package android --build-type=bundle --keystore=/tmp/test-app/nativephp/android/app-keystore.jks --keystore-password="${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" --key-alias="${{ secrets.ANDROID_KEY_ALIAS }}" --key-password="${{ secrets.ANDROID_KEY_PASSWORD }}" --no-tty 2>&1 | tee signed-bundle-build.log
-        BUILD_EXIT_CODE=$?
-        set -e
-        
-        echo "=== Signed build log output ==="
-        tail -20 signed-bundle-build.log
-        
-        echo "=== Verifying signed AAB build output ==="
-        find nativephp/android/app/build/outputs -name "*.aab" -type f | head -5
-        
-        # Check if signed AAB was created
-        if find nativephp/android/app/build/outputs -name "*.aab" -type f | grep -q .; then
-          echo "✅ Signed bundle AAB build successful"
-          AAB_FILE=$(find nativephp/android/app/build/outputs -name "*.aab" -type f | head -1)
-          AAB_SIZE=$(stat -c%s "$AAB_FILE")
-          echo "Signed AAB file: $AAB_FILE"
-          echo "Signed AAB size: $AAB_SIZE bytes"
-        else
-          echo "❌ No signed AAB files found"
-          exit 1
-        fi
-
-    - name: Validate project structure
-      run: |
-        cd /tmp/test-app
-        
-        echo "=== Validating Android project structure ==="
-        
-        # Check key directories exist
-        for dir in "nativephp/android/app/src/main/java" "nativephp/android/app/src/main/assets" "nativephp/android/app/src/main/cpp"; do
-          if [ -d "$dir" ]; then
-            echo "✅ Directory exists: $dir"
+          # Check app ID configuration
+          if grep -q "com.example.test" nativephp/android/app/build.gradle.kts; then
+            echo "✅ App ID correctly configured"
           else
-            echo "❌ Missing directory: $dir"
+            echo "❌ App ID not found in build.gradle.kts"
             exit 1
           fi
-        done
-        
-        # Check key files exist
-        for file in "nativephp/android/gradlew" "nativephp/android/app/build.gradle.kts" "nativephp/android/app/src/main/AndroidManifest.xml"; do
-          if [ -f "$file" ]; then
-            echo "✅ File exists: $file"
+
+          # Check Laravel bundle exists and has content
+          BUNDLE_PATH="nativephp/android/app/src/main/assets/laravel_bundle.zip"
+          if [ -f "$BUNDLE_PATH" ]; then
+            BUNDLE_SIZE=$(stat -c%s "$BUNDLE_PATH")
+            if [ "$BUNDLE_SIZE" -gt 0 ]; then
+              echo "✅ Laravel bundle exists and has content ($BUNDLE_SIZE bytes)"
+            else
+              echo "❌ Laravel bundle exists but is empty (0 bytes)"
+              exit 1
+            fi
           else
-            echo "❌ Missing file: $file"
+            echo "❌ Laravel bundle not found at $BUNDLE_PATH"
             exit 1
           fi
-        done
-        
-        # Check app ID configuration
-        if grep -q "com.example.test" nativephp/android/app/build.gradle.kts; then
-          echo "✅ App ID correctly configured"
-        else
-          echo "❌ App ID not found in build.gradle.kts"
-          exit 1
-        fi
-        
-        # Check Laravel bundle exists and has content
-        BUNDLE_PATH="nativephp/android/app/src/main/assets/laravel_bundle.zip"
-        if [ -f "$BUNDLE_PATH" ]; then
-          BUNDLE_SIZE=$(stat -c%s "$BUNDLE_PATH")
-          if [ "$BUNDLE_SIZE" -gt 0 ]; then
-            echo "✅ Laravel bundle exists and has content ($BUNDLE_SIZE bytes)"
-          else
-            echo "❌ Laravel bundle exists but is empty (0 bytes)"
-            exit 1
-          fi
-        else
-          echo "❌ Laravel bundle not found at $BUNDLE_PATH"
-          exit 1
-        fi
-        
-        echo "✅ All project structure validation passed"
 
-    - name: Collect build artifacts and logs
-      if: always()
-      run: |
-        cd /tmp/test-app
-        
-        echo "=== Collecting artifacts for debugging ==="
-        mkdir -p /tmp/artifacts
-        
-        # Copy build logs
-        cp release-build.log /tmp/artifacts/ 2>/dev/null || echo "No release-build.log found"
-        cp bundle-build.log /tmp/artifacts/ 2>/dev/null || echo "No bundle-build.log found"
-        cp signed-bundle-build.log /tmp/artifacts/ 2>/dev/null || echo "No signed-bundle-build.log found"
-        
-        # Copy all build outputs (both signed and unsigned if available)
-        find nativephp/android/app/build/outputs -name "*.apk" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || echo "No APK files found"
-        find nativephp/android/app/build/outputs -name "*.aab" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || echo "No AAB files found"
-        
-        # Copy gradle files for debugging
-        cp nativephp/android/app/build.gradle.kts /tmp/artifacts/ 2>/dev/null || echo "No build.gradle.kts found"
-        cp nativephp/android/local.properties /tmp/artifacts/ 2>/dev/null || echo "No local.properties found"
-        
-        echo "=== Artifacts collected ==="
-        ls -la /tmp/artifacts/
+          echo "✅ All project structure validation passed"
 
-    - name: Upload artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-artifacts
-        path: /tmp/artifacts/
-        retention-days: 7
+      - name: Collect build artifacts and logs
+        if: always()
+        run: |
+          cd /tmp/test-app
+
+          echo "=== Collecting artifacts for debugging ==="
+          mkdir -p /tmp/artifacts
+
+          # Copy build logs
+          cp release-build.log /tmp/artifacts/ 2>/dev/null || echo "No release-build.log found"
+          cp bundle-build.log /tmp/artifacts/ 2>/dev/null || echo "No bundle-build.log found"
+          cp signed-bundle-build.log /tmp/artifacts/ 2>/dev/null || echo "No signed-bundle-build.log found"
+
+          # Copy all build outputs (both signed and unsigned if available)
+          find nativephp/android/app/build/outputs -name "*.apk" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || echo "No APK files found"
+          find nativephp/android/app/build/outputs -name "*.aab" -exec cp {} /tmp/artifacts/ \; 2>/dev/null || echo "No AAB files found"
+
+          # Copy gradle files for debugging
+          cp nativephp/android/app/build.gradle.kts /tmp/artifacts/ 2>/dev/null || echo "No build.gradle.kts found"
+          cp nativephp/android/local.properties /tmp/artifacts/ 2>/dev/null || echo "No local.properties found"
+
+          echo "=== Artifacts collected ==="
+          ls -la /tmp/artifacts/
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifacts
+          path: /tmp/artifacts/
+          retention-days: 7

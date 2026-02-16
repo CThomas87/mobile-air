@@ -36,6 +36,8 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        BackgroundTaskManager.shared.registerTasks()
+
         // Check if the app was launched from a URL (custom scheme)
         if let url = launchOptions?[UIApplication.LaunchOptionsKey.url] as? URL {
             DebugLogger.shared.log("📱 AppDelegate: Cold start with custom scheme URL: \(url)")
@@ -54,6 +56,14 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         }
 
         return true
+    }
+
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        BackgroundTaskManager.shared.appDidEnterBackground()
+    }
+
+    func applicationWillEnterForeground(_ application: UIApplication) {
+        BackgroundTaskManager.shared.appWillEnterForeground()
     }
 
     // Called for Universal Links

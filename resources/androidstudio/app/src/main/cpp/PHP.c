@@ -1,6 +1,7 @@
 #include "PHP.h"
 #include <android/log.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 
 #define LOG_TAG "PHP-Native"
@@ -93,15 +94,23 @@ void initialize_php_with_request(const char *post_data, const char *method, cons
     php_output_activate();
 
     // Step 5: Setup POST/PATCH/PUT body if needed
-    if (post_data) {
-        size_t post_data_length = strlen(post_data);
+    int has_body = post_data && post_data[0] != '\0';
+    int expects_body = method && (
+        strcasecmp(method, "POST") == 0 ||
+        strcasecmp(method, "PUT") == 0 ||
+        strcasecmp(method, "PATCH") == 0
+    );
 
-        LOGI("📮 Detected POST request");
+    if (has_body || expects_body) {
+        const char *body = post_data ? post_data : "";
+        size_t post_data_length = strlen(body);
+
+        LOGI("📮 Detected request body candidate for method=%s", method);
         LOGI("📦 POST body length: %zu", post_data_length);
-        LOGI("📦 POST body preview (first 200 chars): %.200s", post_data);
+        LOGI("📦 POST body preview (first 200 chars): %.200s", body);
 
         php_stream *mem_stream = php_stream_memory_create(TEMP_STREAM_DEFAULT);
-        php_stream_write(mem_stream, post_data, post_data_length);
+        php_stream_write(mem_stream, body, post_data_length);
 
         SG(request_info).request_body = mem_stream;
         SG(request_info).content_length = post_data_length;
@@ -133,33 +142,19 @@ void capture_php_stdout_output() {
         return;
     }
 
-    // Flush the stream to make sure all data is in memory
     php_stream_flush(g_stdout_stream);
+    php_stream_rewind(g_stdout_stream);
 
-    // Get the length of data in the stream
-    php_stream_seek(g_stdout_stream, 0, SEEK_END);
-    size_t size = php_stream_tell(g_stdout_stream);
-
-    if (size > 0) {
-        // Allocate buffer for the data
-        char *buffer = (char*)malloc(size + 1);
-        if (buffer) {
-            // Rewind to beginning
-            php_stream_rewind(g_stdout_stream);
-
-            // Read all data
-            size_t bytes_read = php_stream_read(g_stdout_stream, buffer, size);
-            buffer[bytes_read] = '\0';
-
-            LOGI("Captured %zu bytes from stdout stream", bytes_read);
-
-            // Send to our output collector
-            pipe_php_output(buffer);
-
-            free(buffer);
-        }
+    zend_string *contents = php_stream_copy_to_mem(g_stdout_stream, PHP_STREAM_COPY_ALL, 0);
+    if (contents && ZSTR_LEN(contents) > 0) {
+        LOGI("Captured %zu bytes from stdout stream", ZSTR_LEN(contents));
+        pipe_php_output(ZSTR_VAL(contents));
+        zend_string_release(contents);
     } else {
         LOGI("Stdout stream is empty");
+        if (contents) {
+            zend_string_release(contents);
+        }
     }
 }
 

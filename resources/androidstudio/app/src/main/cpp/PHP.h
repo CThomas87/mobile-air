@@ -11,6 +11,7 @@ typedef void (*phpOutputCallback)(const char* output);
 void override_embed_module_output(phpOutputCallback callback);
 void initialize_php_with_request(const char* post_data, const char* method, const char* uri);
 size_t capture_php_output(const char *str, size_t str_length);
+void capture_php_stdout_output(void);
 
 #ifdef __cplusplus
 }

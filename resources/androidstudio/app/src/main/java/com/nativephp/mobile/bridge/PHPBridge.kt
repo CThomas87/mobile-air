@@ -13,7 +13,19 @@ import com.nativephp.mobile.security.LaravelCookieStore
 class PHPBridge(private val context: Context) {
     private var lastPostData: String? = null
     private val requestDataMap = ConcurrentHashMap<String, String>()
-    private val phpExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+
+    /**
+     * Fixed thread pool for parallel HTTP request execution.
+     * PHP ZTS (Zend Thread Safety) enables safe concurrent PHP execution.
+     * 2 lanes lets the browser fire parallel requests (e.g. /workers/status +
+     * /workers/activities) without serialization waits.
+     */
+    private val uiPhpExecutor = java.util.concurrent.Executors.newFixedThreadPool(2) { runnable ->
+        Thread(runnable, "NativePHP-UI-Lane").apply {
+            priority = Thread.NORM_PRIORITY
+            isDaemon = false
+        }
+    }
 
     private val nativePhpScript: String
         get() = "${getLaravelPath()}/vendor/nativephp/mobile/bootstrap/android/native.php"
@@ -26,17 +38,20 @@ class PHPBridge(private val context: Context) {
     external fun getLaravelPublicPath(): String
     external fun getLaravelRootPath(): String
     external fun shutdown()
+    external fun nativeSetUiRequestActive(active: Boolean)
     external fun nativeHandleRequestOnce(
         method: String,
         uri: String,
         postData: String?,
-        scriptPath: String
+        scriptPath: String,
+        headers: String
     ): String
 
 
     companion object {
         private const val TAG = "PHPBridge"
         private const val MAX_REQUEST_AGE = 5 * 60 * 1000L
+        private const val MAX_RAW_RESPONSE_CHARS = 2 * 1024 * 1024
 
         init {
             System.loadLibrary("compat")
@@ -48,43 +63,46 @@ class PHPBridge(private val context: Context) {
     fun handleLaravelRequest(request: PHPRequest): String {
         val requestStart = System.currentTimeMillis()
 
-        val future = phpExecutor.submit<String> {
+        /* Ensure bridge JNI reference is up to date (thread-safe via C mutex) */
+        initialize()
+
+        val future = uiPhpExecutor.submit<String> {
             val prepStart = System.currentTimeMillis()
+            val laneThread = Thread.currentThread().name
+            Log.d(TAG, "🧵 UI request lane thread: $laneThread uri=${request.uri}")
 
-            // Clear Inertia-related env vars first - they persist between requests
-            // and cause Laravel to return JSON instead of HTML
-            val inertiaEnvVars = listOf(
-                "HTTP_X_INERTIA",
-                "HTTP_X_INERTIA_VERSION",
-                "HTTP_X_INERTIA_PARTIAL_DATA",
-                "HTTP_X_INERTIA_PARTIAL_COMPONENT",
-                "HTTP_X_INERTIA_PARTIAL_EXCEPT"
-            )
-            inertiaEnvVars.forEach { envVar ->
-                nativeSetEnv(envVar, "", 1)
+            /* ─── Build thread-local headers string ───
+             * Format: "KEY\nVALUE\nKEY\nVALUE\n..."
+             * Passed directly to the C layer via JNI parameter.
+             * Avoids process-global setenv() which races between threads. */
+            val headersStr = buildString {
+                // Request headers (already HTTP_* formatted)
+                request.headers.forEach { (key, value) ->
+                    val envKey = "HTTP_${key.replace("-", "_").uppercase()}"
+                    append(envKey).append('\n').append(value).append('\n')
+                }
+                // Cookies
+                val cookieHeader = LaravelCookieStore.asCookieHeader()
+                if (cookieHeader.isNotEmpty()) {
+                    append("HTTP_COOKIE").append('\n').append(cookieHeader).append('\n')
+                }
             }
-
-            request.headers.forEach { (key, value) ->
-                val envKey = "HTTP_" + key.replace("-", "_").uppercase()
-                nativeSetEnv(envKey, value, 1)
-            }
-
-            val cookieHeader = LaravelCookieStore.asCookieHeader()
-            nativeSetEnv("HTTP_COOKIE", cookieHeader, 1)
-
-            Log.d(TAG, "🍪 Sent HTTP_COOKIE to native: $cookieHeader")
-
-            initialize()
 
             val prepTime = System.currentTimeMillis() - prepStart
             val jniStart = System.currentTimeMillis()
 
-            val output = nativeHandleRequestOnce(
-                request.method,
-                request.uri,
-                request.body,
-                nativePhpScript
-            )
+            nativeSetUiRequestActive(true)
+            val output = try {
+                nativeHandleRequestOnce(
+                    request.method,
+                    request.uri,
+                    request.body,
+                    nativePhpScript,
+                    headersStr
+                )
+            } finally {
+                nativeSetUiRequestActive(false)
+            }
 
             val jniTime = System.currentTimeMillis() - jniStart
             val processStart = System.currentTimeMillis()
@@ -154,15 +172,32 @@ class PHPBridge(private val context: Context) {
     }
 
     fun processRawPHPResponse(response: String): String {
+        val normalizedResponse = run {
+            val statusIndex = response.indexOf("HTTP/")
+            if (statusIndex > 0) {
+                response.substring(statusIndex)
+            } else {
+                response
+            }
+        }
+
+        val boundedResponse = if (normalizedResponse.length > MAX_RAW_RESPONSE_CHARS && !normalizedResponse.startsWith("HTTP/")) {
+            "HTTP/1.1 500 Internal Server Error\r\n" +
+                    "Content-Type: text/plain; charset=utf-8\r\n\r\n" +
+                    "NativePHP response exceeded safe parser limit before HTTP headers."
+        } else {
+            normalizedResponse
+        }
+
         // Log the first 200 characters to understand the response format
-        Log.d(TAG, "🔍 Response first 200 chars: ${response.take(200)}")
+        Log.d(TAG, "🔍 Response first 200 chars: ${boundedResponse.take(200)}")
 
         // Check for Set-Cookie headers regardless of response format
-        if (response.contains("Set-Cookie:", ignoreCase = true)) {
+        if (boundedResponse.contains("Set-Cookie:", ignoreCase = true)) {
             Log.d(TAG, "🍪 Found Set-Cookie in raw response!")
 
             // Extract all Set-Cookie lines
-            val setCookieLines = response.split("\r\n")
+            val setCookieLines = boundedResponse.split("\r\n")
                 .filter { it.startsWith("Set-Cookie:", ignoreCase = true) }
 
             setCookieLines.forEach { cookieLine ->
@@ -186,9 +221,9 @@ class PHPBridge(private val context: Context) {
         }
 
         // Continue with your existing logic for different response types
-        if (response.trim().startsWith("{") && response.trim().endsWith("}")) {
+        if (boundedResponse.trim().startsWith("{") && boundedResponse.trim().endsWith("}")) {
             try {
-                val json = JSONObject(response)
+            val json = JSONObject(boundedResponse)
                 if (json.has("message") && json.getString("message")
                         .contains("CSRF token mismatch")
                 ) {
@@ -197,37 +232,37 @@ class PHPBridge(private val context: Context) {
                             "Content-Type: application/json\r\n" +
                             "X-CSRF-Error: true\r\n" +
                             "\r\n" +
-                            response
+                            boundedResponse
                 }
 
                 // Regular JSON response
                 return "HTTP/1.1 200 OK\r\n" +
                         "Content-Type: application/json\r\n" +
                         "\r\n" +
-                        response
+                        boundedResponse
             } catch (e: Exception) {
                 Log.e(TAG, "Error parsing JSON response", e)
             }
         }
 
         // If it already has headers (check for common header fields)
-        if (response.contains("Content-Type:", ignoreCase = true) ||
-            response.contains("Set-Cookie:", ignoreCase = true)
+        if (boundedResponse.contains("Content-Type:", ignoreCase = true) ||
+            boundedResponse.contains("Set-Cookie:", ignoreCase = true)
         ) {
 
             // It has some headers, but might not have the status line
             // Add a status line if it doesn't have one
-            if (!response.startsWith("HTTP/")) {
-                return "HTTP/1.1 200 OK\r\n" + response
+            if (!boundedResponse.startsWith("HTTP/")) {
+                return "HTTP/1.1 200 OK\r\n" + boundedResponse
             }
-            return response
+            return boundedResponse
         }
 
         // Default case: assume it's just content without headers
         return "HTTP/1.1 200 OK\r\n" +
                 "Content-Type: text/html\r\n" +
                 "\r\n" +
-                response
+                boundedResponse
     }
 
     // All native bridge methods have been migrated to god method pattern
