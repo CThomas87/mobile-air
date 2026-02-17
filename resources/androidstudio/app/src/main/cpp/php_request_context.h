@@ -110,7 +110,9 @@ extern "C"
     job_status_t php_request_get_status(const php_request_context_t *ctx);
     int php_request_get_exit_code(const php_request_context_t *ctx);
     const char *php_request_get_stdout(const php_request_context_t *ctx);
+    size_t php_request_get_stdout_length(const php_request_context_t *ctx);
     const char *php_request_get_stderr(const php_request_context_t *ctx);
+    size_t php_request_get_stderr_length(const php_request_context_t *ctx);
     const char *php_request_get_error(const php_request_context_t *ctx);
     int64_t php_request_get_started_at(const php_request_context_t *ctx);
     int64_t php_request_get_ended_at(const php_request_context_t *ctx);

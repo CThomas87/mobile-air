@@ -160,6 +160,7 @@ static void log_loaded_zend_extensions(void)
     ENGINE_LOGI("Zend OPcache present: %s", zend_get_extension("Zend OPcache") ? "yes" : "no");
 }
 
+
 /* ─── emutls TLS fix for opcache.so on Android ───
  *
  * On Android API < 29, __thread variables use emulated TLS (emutls).

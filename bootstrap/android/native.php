@@ -31,19 +31,43 @@ if ($defaultSocketTimeout > 0) {
 $nativePhpLog('stage=bootstrap_start max_execution='.$maxExecutionSeconds.' socket_timeout='.$defaultSocketTimeout.' uri='.($_SERVER['REQUEST_URI'] ?? '(null)'));
 
 // Capture OPcache status early (will be logged later with timing)
-$_opcacheInfo = 'unknown';
+$buildOpcacheInfo = static function (): string {
+    $engineInfo = (string) ($_SERVER['NATIVEPHP_OPCACHE_ENGINE'] ?? $_ENV['NATIVEPHP_OPCACHE_ENGINE'] ?? '');
+    $engineSuffix = $engineInfo !== '' ? ',engine=' . $engineInfo : '';
 
-if (function_exists('opcache_get_status')) {
-    $opcacheStatus = @opcache_get_status(false);
-    if ($opcacheStatus) {
-        $_opcacheInfo = 'enabled=' . ($opcacheStatus['opcache_enabled'] ? 'YES' : 'NO');
-        $_opcacheInfo .= ',cached=' . ($opcacheStatus['opcache_statistics']['num_cached_scripts'] ?? 0);
-    } else {
-        $_opcacheInfo = 'disabled';
+    $opcacheLoaded = extension_loaded('Zend OPcache') || extension_loaded('opcache');
+    if (! $opcacheLoaded) {
+        return 'NOT_AVAILABLE' . $engineSuffix;
     }
-} else {
-    $_opcacheInfo = 'NOT_AVAILABLE';
-}
+
+    $opcacheEnabled = filter_var(ini_get('opcache.enable'), FILTER_VALIDATE_BOOLEAN)
+        || filter_var(ini_get('opcache.enable_cli'), FILTER_VALIDATE_BOOLEAN);
+
+    if (! function_exists('opcache_get_status')) {
+        return 'AVAILABLE,status=FN_MISSING,ini=' . ($opcacheEnabled ? 'YES' : 'NO') . $engineSuffix;
+    }
+
+    $opcacheStatus = @opcache_get_status(false);
+    if (! is_array($opcacheStatus)) {
+        return 'AVAILABLE,status=UNAVAILABLE,ini=' . ($opcacheEnabled ? 'YES' : 'NO') . $engineSuffix;
+    }
+
+    $statusEnabled = (bool) ($opcacheStatus['opcache_enabled'] ?? false);
+    $statistics = $opcacheStatus['opcache_statistics'] ?? [];
+    $memory = $opcacheStatus['memory_usage'] ?? [];
+    $cachedScripts = (int) ($statistics['num_cached_scripts'] ?? 0);
+    $hits = (int) ($statistics['hits'] ?? 0);
+    $usedMemoryMb = isset($memory['used_memory']) ? round(((int) $memory['used_memory']) / 1048576, 1) : 0;
+
+    return 'AVAILABLE,enabled=' . ($statusEnabled ? 'YES' : 'NO')
+        . ',ini=' . ($opcacheEnabled ? 'YES' : 'NO')
+        . ',cached=' . $cachedScripts
+        . ',hits=' . $hits
+        . ',mem=' . $usedMemoryMb . 'MB'
+        . $engineSuffix;
+};
+
+$_opcacheInfo = $buildOpcacheInfo();
 
 define('LARAVEL_START', microtime(true));
 
@@ -127,6 +151,9 @@ try {
     }
     $_timing['terminate'] = microtime(true);
 
+    // Refresh OPcache status late in the request to capture real cache stats when available.
+    $_opcacheInfo = $buildOpcacheInfo();
+
     // Calculate timing breakdown (in ms)
     $autoloadMs = round(($_timing['autoload'] - $_timing['start']) * 1000, 1);
     $bootstrapMs = round(($_timing['bootstrap'] - $_timing['autoload']) * 1000, 1);
@@ -142,21 +169,27 @@ try {
     error_log("PerfTiming: PHP opcache={$_opcacheInfo} autoload={$autoloadMs}ms bootstrap={$bootstrapMs}ms kernel={$kernelMs}ms capture={$captureMs}ms kernel_boot={$kernelBootMs}ms handle={$handleMs}ms terminate={$terminateMs}ms TOTAL={$totalMs}ms");
 
     // Send headers and body manually (for your bridge)
+    @ignore_user_abort(true);
     $code = $response->getStatusCode();
     $status = \Symfony\Component\HttpFoundation\Response::$statusTexts[$code] ?? 'OK';
-    echo "HTTP/1.1 {$code} {$status}\r\n";
 
-    // Add timing header
-    echo "X-PHP-Timing: opcache={$_opcacheInfo},autoload={$autoloadMs}ms,bootstrap={$bootstrapMs}ms,kernel_boot={$kernelBootMs}ms,handle={$handleMs}ms,total={$totalMs}ms\r\n";
+    $headerLines = [
+        "HTTP/1.1 {$code} {$status}",
+        "X-PHP-Timing: opcache={$_opcacheInfo},autoload={$autoloadMs}ms,bootstrap={$bootstrapMs}ms,kernel_boot={$kernelBootMs}ms,handle={$handleMs}ms,total={$totalMs}ms",
+    ];
 
     foreach ($response->headers->all() as $name => $values) {
         foreach ($values as $value) {
-            echo "{$name}: {$value}\r\n";
+            $headerLines[] = "{$name}: {$value}";
         }
     }
 
-    echo "\r\n";
+    ob_start();
     $response->sendContent();
+    $body = (string) ob_get_clean();
+
+    $payload = implode("\r\n", $headerLines)."\r\n\r\n".$body;
+    echo $payload;
 
 } catch (Throwable $e) {
     $errorId = uniqid('nativephp_', true);

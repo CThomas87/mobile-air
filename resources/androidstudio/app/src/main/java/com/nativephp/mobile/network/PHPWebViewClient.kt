@@ -255,8 +255,13 @@ class PHPWebViewClient(
        var statusCode = 200
        var body = ""
 
-       val parts = rawResponse.split("\r\n\r\n", limit = 2)
-       if (parts.size < 2) {
+       val separator = when {
+           rawResponse.contains("\r\n\r\n") -> "\r\n\r\n"
+           rawResponse.contains("\n\n") -> "\n\n"
+           else -> null
+       }
+
+       if (separator == null) {
            val trimmed = rawResponse.trim()
            if (trimmed.startsWith("HTTP/")) {
                val statusLine = trimmed.lineSequence().firstOrNull()?.trim() ?: ""
@@ -272,8 +277,9 @@ class PHPWebViewClient(
            return Triple(headers, trimmed, statusCode)
        }
 
-       val headerLines = parts[0].split("\r\n")
-       body = parts[1]
+       val parts = rawResponse.split(separator, limit = 2)
+       val headerLines = parts[0].split(Regex("\\r?\\n"))
+       body = parts.getOrNull(1) ?: ""
 
        val statusLine = headerLines.firstOrNull()
        if (statusLine != null && statusLine.startsWith("HTTP/")) {

@@ -56,7 +56,5 @@ test-keystore.jks
 .github/workflows/test-package-local.yml
 
 /composer.lock
-docs/AGENT-GUIDE-NATIVEPHP-WORKERS.md
 docs/architecture-concurrent-runtime.md
 docs/background-execution.md
-docs/laravel-integration.md

@@ -89,6 +89,61 @@ static void log_output_signature(const char *data, size_t len, const char *uri)
     }
 }
 
+static int is_worker_probe_uri(const char *uri)
+{
+    if (!uri)
+    {
+        return 0;
+    }
+
+    return strstr(uri, "/workers/status") != NULL || strstr(uri, "/workers/activities") != NULL;
+}
+
+static void log_transport_body_presence(const char *uri, const char *output)
+{
+    if (!is_worker_probe_uri(uri))
+    {
+        return;
+    }
+
+    if (!output)
+    {
+        LOGI("⏱️ [TRANSPORT] uri=%s raw_len=0 has_body=no body_len=0 separator=none",
+             uri ? uri : "(null)");
+        return;
+    }
+
+    size_t raw_len = strlen(output);
+    const char *body = NULL;
+    const char *separator = "none";
+
+    const char *http_split = strstr(output, "\r\n\r\n");
+    if (http_split)
+    {
+        body = http_split + 4;
+        separator = "crlf";
+    }
+    else
+    {
+        const char *lf_split = strstr(output, "\n\n");
+        if (lf_split)
+        {
+            body = lf_split + 2;
+            separator = "lf";
+        }
+    }
+
+    size_t body_len = body ? strlen(body) : 0;
+    const char *has_body = body_len > 0 ? "yes" : "no";
+
+    LOGI("⏱️ [TRANSPORT] uri=%s raw_len=%zu has_body=%s body_len=%zu separator=%s",
+         uri ? uri : "(null)",
+         raw_len,
+         has_body,
+         body_len,
+         separator);
+}
+
 static void capture_legacy_output_buffer(const char *uri)
 {
     zval output_buffer;
@@ -362,6 +417,8 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
      * ═══════════════════════════════════════════════════════════════ */
     if (php_engine_is_initialized())
     {
+        static pthread_mutex_t g_engine_http_request_mutex = PTHREAD_MUTEX_INITIALIZER;
+
         LOGI("⏱️ [TIMING] run_php_script_once ENGINE MODE: START uri=%s", safe_uri);
         /* ENGINE MODE: Do NOT touch g_collected_output — it's shared
          * across threads and would race.  TLS-routed output is used instead. */
@@ -373,12 +430,15 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
             return strdup("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nThread attach failed.");
         }
 
+        pthread_mutex_lock(&g_engine_http_request_mutex);
+
         /* Create a request context for TLS-routed output capture */
         php_request_context_t *ctx = php_request_create(
             "http-request", JOB_TYPE_HTTP, safe_script_path, NULL);
         if (!ctx)
         {
             LOGE("❌ ENGINE MODE: context creation failed uri=%s", safe_uri);
+            pthread_mutex_unlock(&g_engine_http_request_mutex);
             return strdup("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nAllocation failed.");
         }
         php_request_set_current(ctx);
@@ -410,10 +470,10 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
         const char *output = php_request_get_stdout(ctx);
         const char *stderr_output = php_request_get_stderr(ctx);
         const char *error_output = php_request_get_error(ctx);
-        size_t output_len = output ? strlen(output) : 0;
-        size_t stderr_len = stderr_output ? strlen(stderr_output) : 0;
+        size_t output_len = php_request_get_stdout_length(ctx);
+        size_t stderr_len = php_request_get_stderr_length(ctx);
         size_t error_len = error_output ? strlen(error_output) : 0;
-        const char *final_output = (output_len > 0) ? output : "";
+        const char *final_output = (output_len > 0 && output) ? output : "";
         size_t final_len = output_len;
         char *response = NULL;
 
@@ -444,7 +504,16 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
         }
         else
         {
-            response = strdup(final_output);
+            response = (char *)malloc(final_len + 1);
+            if (response)
+            {
+                memcpy(response, final_output, final_len);
+                response[final_len] = '\0';
+            }
+            else
+            {
+                response = strdup("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nAllocation failed.");
+            }
         }
 
         LOGI("⏱️ [TIMING] ENGINE MODE: output_len=%zu stderr_len=%zu error_len=%zu final_len=%zu uri=%s",
@@ -464,6 +533,7 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
 
         php_request_set_current(NULL);
         php_request_destroy(ctx);
+        pthread_mutex_unlock(&g_engine_http_request_mutex);
 
         LOGI("⏱️ [TIMING] run_php_script_once ENGINE MODE: END uri=%s", safe_uri);
         return response;
@@ -975,6 +1045,8 @@ JNIEXPORT jstring JNICALL native_handle_request_once(
          post ? strlen(post) : 0);
 
     char *output = run_php_script_once(path, method, uri, post, hdrs);
+
+    log_transport_body_presence(uri, output);
 
     LOGI("⏱️ [TIMING] JNI native_handle_request_once END uri=%s output_len=%zu",
          uri ? uri : "(null)",

@@ -8,6 +8,7 @@
 
 /* PHP headers */
 #include "php_embed.h"
+#include "php_output.h"
 #include "zend.h"
 #include "zend_exceptions.h"
 #include "zend_atomic.h"
@@ -48,6 +49,20 @@ static __thread void (*tls_prev_interrupt_function)(zend_execute_data *) = NULL;
         fprintf(stderr, "\n");                  \
     } while (0)
 #endif
+
+/* DEBUG_REMOVE_AFTER_INVESTIGATION: temporary probe for workers HTTP output chunks. */
+#define DEBUG_HTTP_WRITE_PROBE_MAX_CHUNKS 3
+#define DEBUG_HTTP_WRITE_PREVIEW_BYTES 160
+
+static int is_workers_probe_uri(const char *uri)
+{
+    if (!uri)
+    {
+        return 0;
+    }
+
+    return strstr(uri, "/workers/status") != NULL || strstr(uri, "/workers/activities") != NULL;
+}
 
 /* ─── Output buffer constants ─── */
 #define OUTPUT_CHUNK_SIZE (64 * 1024)     /* 64KB increments */
@@ -150,7 +165,90 @@ struct php_request_context
     char *request_uri;    /* e.g. "/workers/status?foo=bar" */
     char *query_string;   /* e.g. "foo=bar" (NULL if none) */
     char *headers_raw;    /* "KEY\nVALUE\nKEY\nVALUE\n..." for $_SERVER injection */
+
+    int debug_http_write_probe_count; /* DEBUG_REMOVE_AFTER_INVESTIGATION */
 };
+
+static void log_workers_http_write_chunk(struct php_request_context *ctx, const char *str, size_t str_length)
+{
+    if (!ctx || !str || str_length == 0)
+    {
+        return;
+    }
+
+    if (ctx->job_type != JOB_TYPE_HTTP || !is_workers_probe_uri(ctx->request_uri))
+    {
+        return;
+    }
+
+    if (ctx->debug_http_write_probe_count >= DEBUG_HTTP_WRITE_PROBE_MAX_CHUNKS)
+    {
+        return;
+    }
+
+    char preview[DEBUG_HTTP_WRITE_PREVIEW_BYTES + 1];
+    size_t preview_length = str_length < DEBUG_HTTP_WRITE_PREVIEW_BYTES ? str_length : DEBUG_HTTP_WRITE_PREVIEW_BYTES;
+    for (size_t index = 0; index < preview_length; index++)
+    {
+        unsigned char ch = (unsigned char)str[index];
+        preview[index] = (ch >= 32 && ch <= 126) ? (char)ch : '.';
+    }
+    preview[preview_length] = '\0';
+
+    RC_LOGI("[WRITE-PROBE] uri=%s chunk_index=%d chunk_len=%zu preview=%s",
+            ctx->request_uri ? ctx->request_uri : "(null)",
+            ctx->debug_http_write_probe_count,
+            str_length,
+            preview);
+
+    ctx->debug_http_write_probe_count++;
+}
+
+static void capture_http_output_buffer_fallback(struct php_request_context *ctx)
+{
+    if (!ctx || ctx->job_type != JOB_TYPE_HTTP)
+    {
+        return;
+    }
+
+    zval output_buffer;
+    ZVAL_UNDEF(&output_buffer);
+
+    if (php_output_get_contents(&output_buffer) == SUCCESS &&
+        Z_TYPE(output_buffer) == IS_STRING &&
+        Z_STRLEN(output_buffer) > 0)
+    {
+        const char *buffer_data = Z_STRVAL(output_buffer);
+        size_t buffer_len = (size_t)Z_STRLEN(output_buffer);
+
+        if (!buffer_data)
+        {
+            zval_ptr_dtor(&output_buffer);
+            return;
+        }
+
+        if (buffer_len > ctx->stdout_buf.length)
+        {
+            if (ctx->stdout_buf.data)
+            {
+                ctx->stdout_buf.length = 0;
+                ctx->stdout_buf.data[0] = '\0';
+            }
+
+            buf_append(&ctx->stdout_buf, buffer_data, buffer_len);
+
+            if (is_workers_probe_uri(ctx->request_uri))
+            {
+                RC_LOGI("[BUFFER-FALLBACK] uri=%s replaced_stdout_len=%zu fallback_len=%zu",
+                        ctx->request_uri ? ctx->request_uri : "(null)",
+                        ctx->stdout_buf.length,
+                        buffer_len);
+            }
+        }
+    }
+
+    zval_ptr_dtor(&output_buffer);
+}
 
 /* ─── Thread-local current context ─── */
 static __thread php_request_context_t *tls_current_ctx = NULL;
@@ -263,6 +361,7 @@ php_request_context_t *php_request_create(const char *job_id,
     ctx->request_uri = NULL;
     ctx->query_string = NULL;
     ctx->headers_raw = NULL;
+    ctx->debug_http_write_probe_count = 0;
 
     return ctx;
 }
@@ -575,10 +674,8 @@ int php_request_execute(php_request_context_t *ctx)
         zend_file_handle file_handle;
         zend_stream_init_filename(&file_handle, ctx->script_path);
 
-        /* php_execute_script() returns bool: true on success, false on failure.
-         * Do NOT compare against SUCCESS (which is 0 / zend_result) — that
-         * inverts the check and makes every successful run appear as FAILURE. */
-        if (php_execute_script(&file_handle))
+        zend_result script_result = php_execute_script(&file_handle);
+        if (script_result == SUCCESS)
         {
             ctx->exit_code = EG(exit_status);
             if (ctx->exit_code == 0 && !atomic_load(&ctx->cancelled))
@@ -690,6 +787,10 @@ int php_request_execute(php_request_context_t *ctx)
     }
     zend_end_try();
 
+    capture_http_output_buffer_fallback(ctx);
+
+    php_output_end_all();
+
     /* Request shutdown — cleans up request-scoped state */
     zend_interrupt_function = tls_prev_interrupt_function;
     tls_prev_interrupt_function = NULL;
@@ -772,9 +873,19 @@ const char *php_request_get_stdout(const php_request_context_t *ctx)
     return (ctx && ctx->stdout_buf.data) ? ctx->stdout_buf.data : "";
 }
 
+size_t php_request_get_stdout_length(const php_request_context_t *ctx)
+{
+    return ctx ? ctx->stdout_buf.length : 0;
+}
+
 const char *php_request_get_stderr(const php_request_context_t *ctx)
 {
     return (ctx && ctx->stderr_buf.data) ? ctx->stderr_buf.data : "";
+}
+
+size_t php_request_get_stderr_length(const php_request_context_t *ctx)
+{
+    return ctx ? ctx->stderr_buf.length : 0;
 }
 
 const char *php_request_get_error(const php_request_context_t *ctx)
@@ -852,6 +963,7 @@ size_t php_request_ub_write(const char *str, size_t str_length)
     php_request_context_t *ctx = tls_current_ctx;
     if (ctx)
     {
+        log_workers_http_write_chunk(ctx, str, str_length);
         buf_append(&ctx->stdout_buf, str, str_length);
     }
     /* If no context, output is silently dropped (engine init phase) */
