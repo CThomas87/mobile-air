@@ -14,7 +14,7 @@
 #   scripts/build_php_android_arm64.sh
 #
 # Optional env overrides:
-#   PHP_VERSION=php-8.4.15
+#   PHP_VERSION=php-8.4.5    (default; any php-8.4.x tag)
 #   API=24
 #   ANDROID_NDK_HOME=/opt/android-ndk-r27
 #   WORK_DIR=$HOME/build/php-android
@@ -23,10 +23,23 @@
 #   EXTRA_CONFIGURE_FLAGS="--disable-all"
 #   EMIT_JNILIBS_ZIP=1
 #   INSTALL_TO_PROJECT=1
+#   SKIP_BUILD=1             (reuse existing build; verify + install only)
 
 set -euo pipefail
 
-PHP_VERSION="${PHP_VERSION:-php-8.4.15}"
+# ── CRLF self-healing ──
+# Git on Windows can inject \\r; strip them so bash doesn't choke.
+if [[ "$(head -c 50 "${BASH_SOURCE[0]}" | od -c | grep -c '\\r')" -gt 0 ]]; then
+  tmpf=$(mktemp)
+  tr -d '\\r' < "${BASH_SOURCE[0]}" > "$tmpf"
+  exec bash "$tmpf" "$@"
+fi
+
+# ── Skip-build support ──
+# Set SKIP_BUILD=1 to reuse existing artifacts (verify + install only).
+SKIP_BUILD="${SKIP_BUILD:-0}"
+
+PHP_VERSION="${PHP_VERSION:-php-8.4.5}"
 API="${API:-24}"
 JOBS="${JOBS:-$(nproc)}"
 ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
@@ -44,6 +57,22 @@ INSTALL_DIR="${BUILD_DIR}/out"
 ARTIFACTS_DIR="${WORK_DIR}/artifacts"
 STAGE_ROOT="${WORK_DIR}/stage"
 STAGE_JNILIBS_DIR="${STAGE_ROOT}/jniLibs/arm64-v8a"
+
+# ── Auto-detect cross-compiled deps ──
+# Pre-built third-party libs (iconv, curl, openssl, libxml2, sqlite3, etc.)
+# used by the configure step.  Auto-probe common locations if not set.
+if [[ -z "${DEPS_PREFIX:-}" ]]; then
+  for _probe in \
+    "${HOME}/php-deps/build-arm64-v8a" \
+    "${WORK_DIR}/deps/build-arm64-v8a" \
+    "/opt/php-deps/build-arm64-v8a"; do
+    if [[ -d "${_probe}/lib" && -f "${_probe}/include/iconv.h" ]]; then
+      DEPS_PREFIX="${_probe}"
+      break
+    fi
+  done
+fi
+DEPS_PREFIX="${DEPS_PREFIX:-}"
 
 JNI_LIB_DIR="${PROJECT_ROOT}/resources/androidstudio/app/src/main/jniLibs/arm64-v8a"
 INCLUDE_DIR="${PROJECT_ROOT}/resources/androidstudio/app/src/main/cpp/include/php"
@@ -147,13 +176,15 @@ configure_env() {
   # When cross-compiling with pre-built third-party libraries (iconv, curl,
   # ssl, etc.), the compiler/linker needs explicit -I/-L paths since the
   # sysroot isolates search directories.
-  local deps_prefix="${DEPS_PREFIX:-}"
-  if [[ -n "${deps_prefix}" && -d "${deps_prefix}" ]]; then
-    export CFLAGS="${CFLAGS} -I${deps_prefix}/include"
-    export CXXFLAGS="${CXXFLAGS} -I${deps_prefix}/include"
-    export CPPFLAGS="${CPPFLAGS} -I${deps_prefix}/include"
-    export LDFLAGS="${LDFLAGS} -L${deps_prefix}/lib"
-    log "Added cross-compile deps prefix: ${deps_prefix}"
+  if [[ -n "${DEPS_PREFIX}" && -d "${DEPS_PREFIX}" ]]; then
+    export CFLAGS="${CFLAGS} -I${DEPS_PREFIX}/include"
+    export CXXFLAGS="${CXXFLAGS} -I${DEPS_PREFIX}/include"
+    export CPPFLAGS="${CPPFLAGS} -I${DEPS_PREFIX}/include"
+    export LDFLAGS="${LDFLAGS} -L${DEPS_PREFIX}/lib"
+    export PKG_CONFIG_PATH="${DEPS_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    log "Cross-compile deps prefix: ${DEPS_PREFIX}"
+  else
+    warn "DEPS_PREFIX not set and not auto-detected — configure may fail on iconv, sqlite3, etc."
   fi
 }
 
@@ -169,6 +200,22 @@ build_php() {
 
   local extra_flags="${EXTRA_CONFIGURE_FLAGS:-}"
 
+  # Build configure flags for available deps.
+  local dep_flags=""
+  if [[ -n "${DEPS_PREFIX}" && -d "${DEPS_PREFIX}" ]]; then
+    [[ -f "${DEPS_PREFIX}/include/iconv.h" ]]    && dep_flags+=" --with-iconv=${DEPS_PREFIX}"
+    [[ -f "${DEPS_PREFIX}/include/sqlite3.h" ]]   && dep_flags+=" --with-sqlite3=${DEPS_PREFIX}"
+    [[ -d "${DEPS_PREFIX}/include/libxml2" || -f "${DEPS_PREFIX}/include/libxml/tree.h" ]] \
+      && dep_flags+=" --with-libxml"
+    [[ -f "${DEPS_PREFIX}/include/sodium.h" ]]    && dep_flags+=" --with-sodium=${DEPS_PREFIX}"
+    [[ -d "${DEPS_PREFIX}/include/curl" ]]        && dep_flags+=" --with-curl=${DEPS_PREFIX}"
+    [[ -d "${DEPS_PREFIX}/include/openssl" ]]     && dep_flags+=" --with-openssl=${DEPS_PREFIX}"
+    [[ -f "${DEPS_PREFIX}/include/zlib.h" ]]      && dep_flags+=" --with-zlib"
+    [[ -f "${DEPS_PREFIX}/include/zip.h" ]]       && dep_flags+=" --with-zip"
+    [[ -f "${DEPS_PREFIX}/include/oniguruma.h" ]] && dep_flags+=" --enable-mbstring"
+    log "Auto-detected dep flags:${dep_flags}"
+  fi
+
   log "Configuring PHP (${PHP_VERSION}) for ${TARGET} API ${API}"
 
   "${SRC_DIR}/configure" \
@@ -183,6 +230,7 @@ build_php() {
     --disable-phpdbg \
     --without-pear \
     --with-layout=GNU \
+    ${dep_flags} \
     ${extra_flags}
 
   # Android Bionic (NDK r27, API 24) does NOT provide the full BIND
@@ -244,13 +292,21 @@ build_php() {
     cat >> "${cfg_h}" <<'GLOB_PROTO'
 
 /* Function prototypes for our glob/globfree shim (android_compat.c).
-   The NDK <glob.h> hides these behind __ANDROID_API__ >= 28. */
+   The NDK <glob.h> hides these behind __ANDROID_API__ >= 28.
+   Wrapped in extern "C" so the prototypes have C linkage even when
+   this header is included from C++ translation units. */
 #include <glob.h>
 #ifndef GLOB_BRACE
 #define GLOB_BRACE 0x0080
 #endif
+#ifdef __cplusplus
+extern "C" {
+#endif
 int glob(const char *, int, int (*)(const char *, int), glob_t *);
 void globfree(glob_t *);
+#ifdef __cplusplus
+}
+#endif
 GLOB_PROTO
   fi
   # Removing HAVE_DN_SKIPNAME and HAVE_DN_EXPAND causes the dns_get_record
@@ -270,6 +326,18 @@ GLOB_PROTO
     sed -i 's/^#define HAVE_GETDTABLESIZE 1/\/* #undef HAVE_GETDTABLESIZE *\//' "${confdefs}" 2>/dev/null || true
     sed -i 's/^#define HAVE_FULL_DNS_FUNCS 1/\/* #undef HAVE_FULL_DNS_FUNCS *\//' "${confdefs}" 2>/dev/null || true
   fi
+
+  # ── Force all symbols visible ──
+  # PHP 8.4's configure adds -fvisibility=hidden by default.  While ZEND_API,
+  # PHPAPI, and EMBED_SAPI_API annotate key symbols with visibility("default"),
+  # Android's libtool/linker combo can still drop them from the .dynsym table
+  # in some configurations.  Removing -fvisibility=hidden guarantees that
+  # execute_ex, php_embed_init, zend_execute_ex, and all other symbols the
+  # native wrapper (php_engine.c) and extensions (opcache.so) need are always
+  # present in the dynamic symbol table.
+  # Trade-off: libphp.so grows ~1-2MB.  Acceptable for mobile.
+  log "Patching Makefile: removing -fvisibility=hidden (ensures execute_ex export)"
+  sed -i 's/-fvisibility=hidden//g' "${BUILD_DIR}/Makefile"
 
   # Compile the Android compatibility shim (getrandom, nl_langinfo stubs)
   # and inject into the link step via EXTRA_LIBS.
@@ -313,37 +381,94 @@ verify_symbols() {
   local nm="${TOOLCHAIN}/bin/llvm-nm"
 
   log "Verifying required symbols in libphp.so"
+  log "  target: ${libphp}  ($(stat -c%s "${libphp}" 2>/dev/null || echo '?') bytes)"
 
-  "${nm}" -D --defined-only "${libphp}" | grep -q " php_embed_init$" \
-    || fatal "php_embed_init symbol missing (embed SAPI not built correctly)"
+  # Cache the full dynamic-symbol dump once.
+  local syms_file
+  syms_file=$(mktemp)
+  "${nm}" -D --defined-only "${libphp}" > "${syms_file}"
 
-  "${nm}" -D --defined-only "${libphp}" | grep -q " tsrm_get_ls_cache$" \
-    || fatal "tsrm_get_ls_cache missing (ZTS runtime missing)"
+  # Helper: check a symbol is present; on failure dump relevant context.
+  _require_sym() {
+    local sym="$1" msg="$2"
+    if ! grep -q " ${sym}$" "${syms_file}"; then
+      warn "Missing symbol: ${sym}"
+      warn "Nearby exported symbols matching '${sym%%_*}':"
+      grep -i "${sym%%_*}" "${syms_file}" | head -20 || true
+      warn "Total exported symbols: $(wc -l < "${syms_file}")"
+      rm -f "${syms_file}"
+      fatal "${msg}"
+    fi
+  }
 
-  "${nm}" -D --defined-only "${libphp}" | grep -q " ts_resource_ex$" \
-    || fatal "ts_resource_ex missing (ZTS runtime missing)"
-
-  "${nm}" -D --defined-only "${libphp}" | grep -q " ts_free_thread$" \
-    || fatal "ts_free_thread missing (ZTS runtime missing)"
-
-  "${nm}" -D --defined-only "${libphp}" | grep -q " executor_globals_offset$" \
-    || fatal "executor_globals_offset missing (likely NTS libphp.so)"
-
-  "${nm}" -D --defined-only "${libphp}" | grep -q " sapi_globals_offset$" \
-    || fatal "sapi_globals_offset missing (likely NTS libphp.so)"
-
-  "${nm}" -D --defined-only "${libphp}" | grep -q " core_globals_offset$" \
-    || fatal "core_globals_offset missing (likely NTS libphp.so)"
+  _require_sym php_embed_init  "php_embed_init missing (embed SAPI not built correctly)"
+  _require_sym tsrm_get_ls_cache "tsrm_get_ls_cache missing (ZTS runtime missing)"
+  _require_sym ts_resource_ex  "ts_resource_ex missing (ZTS runtime missing)"
+  _require_sym ts_free_thread  "ts_free_thread missing (ZTS runtime missing)"
+  _require_sym executor_globals_offset "executor_globals_offset missing (likely NTS libphp.so)"
+  _require_sym sapi_globals_offset     "sapi_globals_offset missing (likely NTS libphp.so)"
+  _require_sym core_globals_offset     "core_globals_offset missing (likely NTS libphp.so)"
 
   # Critical for OPcache module load compatibility.
-  "${nm}" -D --defined-only "${libphp}" | grep -q " execute_ex$" \
-    || fatal "execute_ex symbol missing in libphp.so (OPcache will fail to load)"
+  _require_sym execute_ex      "execute_ex missing in libphp.so (OPcache will fail to load)"
+  _require_sym zend_execute_ex "zend_execute_ex missing in libphp.so (OPcache will fail to load)"
+
+  rm -f "${syms_file}"
 
   local cfg_h="${BUILD_DIR}/main/php_config.h"
   [[ -f "${cfg_h}" ]] || fatal "php_config.h not found at ${cfg_h}"
   grep -q '^#define ZTS 1' "${cfg_h}" || fatal "php_config.h does not define ZTS 1"
 
   log "Symbol and header verification passed"
+}
+
+patch_opcache_dt_needed() {
+  local opcache="$1"
+
+  # ── Belt-and-suspenders: add DT_NEEDED libphp.so to opcache.so ──
+  #
+  # PHP builds opcache.so without a DT_NEEDED entry for libphp.so — it
+  # relies on the host process having PHP symbols in global scope.  On
+  # Android, libphp.so is loaded via System.loadLibrary() which uses
+  # RTLD_LOCAL, so those symbols are invisible to dlopen'd extensions.
+  #
+  # The php_preloader library (loaded before "php") handles this at runtime
+  # by loading libphp.so with RTLD_GLOBAL first.  However, adding an
+  # explicit DT_NEEDED provides an additional safety net: the Bionic linker
+  # will directly resolve opcache.so's 426+ undefined symbols from
+  # libphp.so via the dependency chain, regardless of RTLD_GLOBAL scope.
+  #
+  # Also remove the stale RUNPATH that points to the build machine's
+  # cross-compile prefix (e.g. /home/chris/php-deps/build-arm64-v8a/lib).
+
+  if ! command -v patchelf >/dev/null 2>&1; then
+    warn "patchelf not found — skipping DT_NEEDED injection for opcache.so"
+    warn "Install patchelf: sudo apt-get install patchelf"
+    warn "Without DT_NEEDED, opcache relies solely on php_preloader RTLD_GLOBAL"
+    return 0
+  fi
+
+  # Check if DT_NEEDED for libphp.so is already present
+  if readelf -d "${opcache}" | grep -q 'NEEDED.*libphp\.so'; then
+    log "opcache.so already has DT_NEEDED: libphp.so — no patch needed"
+  else
+    log "Adding DT_NEEDED libphp.so to opcache.so via patchelf"
+    patchelf --add-needed libphp.so "${opcache}"
+
+    if readelf -d "${opcache}" | grep -q 'NEEDED.*libphp\.so'; then
+      log "opcache.so now has DT_NEEDED: libphp.so ✓"
+    else
+      warn "patchelf ran but DT_NEEDED for libphp.so not found — verify manually"
+    fi
+  fi
+
+  # Remove stale RUNPATH from build machine (e.g. /home/user/php-deps/...)
+  local runpath
+  runpath="$(readelf -d "${opcache}" 2>/dev/null | grep -oP '(?<=RUNPATH\s{1,30})\S+' || true)"
+  if [[ -n "${runpath}" ]]; then
+    log "Removing stale RUNPATH from opcache.so: ${runpath}"
+    patchelf --remove-rpath "${opcache}"
+  fi
 }
 
 verify_pair_origin() {
@@ -387,6 +512,12 @@ install_to_project() {
 
   # Also copy generated config header used by CMake ZTS check.
   cp -f "${BUILD_DIR}/main/php_config.h" "${PHP_CONFIG_HEADER_DEST}"
+
+  # The make install step placed an un-patched php_config.h into
+  # include/php/main/php_config.h.  Overwrite it with the patched copy so
+  # that both copies (include/php_config.h AND include/php/main/php_config.h)
+  # carry the same extern-"C" glob/globfree guards, HAVE_GLOB, etc.
+  cp -f "${BUILD_DIR}/main/php_config.h" "${INCLUDE_DIR}/main/php_config.h"
 
   log "Installed artifacts into project"
 }
@@ -449,14 +580,23 @@ final_report() {
 main() {
   validate_version
   ensure_tools
-  prepare_source
-  patch_source_for_android
-  configure_env
-  build_php
+
+  if [[ "${SKIP_BUILD}" == "1" ]]; then
+    log "SKIP_BUILD=1 — reusing existing build artifacts"
+    if [[ ! -d "${BUILD_DIR}" ]]; then
+      fatal "SKIP_BUILD=1 but BUILD_DIR does not exist: ${BUILD_DIR}"
+    fi
+  else
+    prepare_source
+    patch_source_for_android
+    configure_env
+    build_php
+  fi
 
   IFS='|' read -r libphp opcache < <(find_outputs)
   verify_symbols "${libphp}"
   verify_pair_origin "${libphp}" "${opcache}"
+  patch_opcache_dt_needed "${opcache}"
   stage_pipeline_layout "${libphp}" "${opcache}"
 
   if [[ "${INSTALL_TO_PROJECT}" == "1" ]]; then

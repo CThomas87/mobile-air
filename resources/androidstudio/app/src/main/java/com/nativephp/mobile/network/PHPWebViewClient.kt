@@ -257,8 +257,19 @@ class PHPWebViewClient(
 
        val parts = rawResponse.split("\r\n\r\n", limit = 2)
        if (parts.size < 2) {
+           val trimmed = rawResponse.trim()
+           if (trimmed.startsWith("HTTP/")) {
+               val statusLine = trimmed.lineSequence().firstOrNull()?.trim() ?: ""
+               val statusParts = statusLine.split(" ")
+               if (statusParts.size >= 2) {
+                   statusCode = statusParts[1].toIntOrNull() ?: 200
+               }
+               Log.w(TAG, "⚠️ Status-line-only response received from native layer: $statusLine")
+               return Triple(headers, "", statusCode)
+           }
+
            Log.w(TAG, "⚠️ Could not split response into headers/body. Raw: ${rawResponse.take(200)}")
-           return Triple(headers, rawResponse.trim(), statusCode)
+           return Triple(headers, trimmed, statusCode)
        }
 
        val headerLines = parts[0].split("\r\n")

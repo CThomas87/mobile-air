@@ -187,6 +187,29 @@ class WorkerConfig
     }
 
     /**
+     * Whether OPcache file cache (disk persistence) is enabled.
+     * When enabled, compiled bytecode is persisted to disk in addition to SHM,
+     * dramatically reducing cold boot times.
+     */
+    public static function opcacheFileCache(): bool
+    {
+        return (bool) \config('nativephp-worker.opcache_file_cache',
+            \env('NATIVEPHP_OPCACHE_FILE_CACHE', true));
+    }
+
+    /**
+     * Get the OPcache file cache directory path.
+     * Located inside the app's storage directory.
+     */
+    public static function opcacheFileCachePath(): string
+    {
+        $storagePath = \env('LARAVEL_STORAGE_PATH')
+            ?: app()->storagePath();
+
+        return rtrim($storagePath, '/\\') . '/framework/opcache';
+    }
+
+    /**
      * Whether Redis queue backend is enabled.
      */
     public static function redisEnabled(): bool
@@ -228,6 +251,32 @@ class WorkerConfig
     }
 
     /**
+     * Android execution strategy: 'auto', 'foreground', or 'workmanager'.
+     *
+     * 'auto' uses WorkManager on Android 14+ (API 34+), Foreground Service on older.
+     * 'foreground' always uses PhpWorkerService (FGS).
+     * 'workmanager' always uses PhpPeriodicWorker (WorkManager).
+     */
+    public static function androidExecutionStrategy(): string
+    {
+        $strategy = (string) \config('nativephp-worker.android_execution_strategy',
+            \env('NATIVEPHP_ANDROID_EXECUTION_STRATEGY', 'auto'));
+
+        return in_array($strategy, ['auto', 'foreground', 'workmanager'], true)
+            ? $strategy
+            : 'auto';
+    }
+
+    /**
+     * WorkManager repeat interval in minutes (min 15 per Android policy).
+     */
+    public static function workManagerIntervalMinutes(): int
+    {
+        return max(15, (int) \config('nativephp-worker.workmanager_interval_minutes',
+            \env('NATIVEPHP_WORKMANAGER_INTERVAL_MINUTES', 15)));
+    }
+
+    /**
      * Check if running on iOS.
      */
     public static function isIos(): bool
@@ -241,5 +290,35 @@ class WorkerConfig
     public static function isAndroid(): bool
     {
         return strtolower((string) \env('NATIVEPHP_PLATFORM', '')) === 'android';
+    }
+
+    /**
+     * Get the priority map: queue name → native priority level.
+     *
+     * @return array<string, int>
+     */
+    public static function priorityMap(): array
+    {
+        $map = \config('nativephp-worker.priority_map', [
+            'high'    => 5,
+            'default' => 0,
+            'low'     => -5,
+        ]);
+
+        return is_array($map) ? $map : [];
+    }
+
+    /**
+     * Resolve the native priority for a given queue name.
+     *
+     * @param string $queue Queue name
+     * @return int Priority level (-10 to +10)
+     */
+    public static function priorityForQueue(string $queue): int
+    {
+        $map = self::priorityMap();
+        $priority = $map[$queue] ?? 0;
+
+        return max(-10, min(10, (int) $priority));
     }
 }

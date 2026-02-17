@@ -142,6 +142,7 @@ struct php_request_context
 
     atomic_int cancelled;
     int crash_count; /* circuit breaker: consecutive crashes */
+    int priority;    /* job priority: higher = more urgent (-10 to +10) */
 
     /* Per-request HTTP info — avoids process-global setenv() races.
      * Populated via php_request_set_http_info() before execute. */
@@ -256,6 +257,7 @@ php_request_context_t *php_request_create(const char *job_id,
     ctx->ended_at_ms = 0;
     atomic_init(&ctx->cancelled, 0);
     ctx->crash_count = 0;
+    ctx->priority = 0;
 
     ctx->request_method = NULL;
     ctx->request_uri = NULL;
@@ -355,8 +357,6 @@ int php_request_execute(php_request_context_t *ctx)
     /* ─── PHP request lifecycle ─── */
     int result = 0;
 
-    RC_LOGI("[DIAG] job %s step=1 BEFORE php_request_startup (type=%d)", ctx->job_id, ctx->job_type);
-
     /* Request startup — creates request-scoped state for this thread */
     if (php_request_startup() == FAILURE)
     {
@@ -368,7 +368,11 @@ int php_request_execute(php_request_context_t *ctx)
         return -1;
     }
 
-    RC_LOGI("[DIAG] job %s step=2 AFTER php_request_startup OK", ctx->job_id);
+    /* Fix OPcache per-thread state.
+     * In ZTS file_cache_only mode, ZCG(enabled) starts as 0 on worker threads
+     * because accel_globals_ctor zeroes it and OnEnable ignores ACTIVATE stage.
+     * This forces it to 1 and re-runs accel_activate(). */
+    fix_opcache_request_state();
 
     /* Install cooperative cancellation via zend_interrupt_function.
      * PHP periodically checks this hook between opcodes. When the
@@ -377,22 +381,18 @@ int php_request_execute(php_request_context_t *ctx)
     tls_prev_interrupt_function = zend_interrupt_function;
     zend_interrupt_function = php_request_interrupt_handler;
 
-    RC_LOGI("[DIAG] job %s step=3 BEFORE memory_limit eval", ctx->job_id);
-
     /* Apply memory limit policy by job type.
      * Worker jobs use supervisor-configured limits.
      * HTTP jobs use a dedicated limit (env override, safe default). */
     if (ctx->job_type == JOB_TYPE_QUEUE || ctx->job_type == JOB_TYPE_SCHEDULER)
     {
         const char *mem_limit = supervisor_get_memory_limit();
-        RC_LOGI("[DIAG] job %s step=3a worker memory_limit=%s", ctx->job_id, mem_limit ? mem_limit : "(null)");
         if (mem_limit && mem_limit[0] != '\0')
         {
             char ini_cmd[128];
             snprintf(ini_cmd, sizeof(ini_cmd),
                      "ini_set('memory_limit', '%s');", mem_limit);
             zend_eval_string(ini_cmd, NULL, "worker_memory_limit");
-            RC_LOGI("[DIAG] job %s step=3b worker memory_limit eval DONE", ctx->job_id);
         }
     }
     else if (ctx->job_type == JOB_TYPE_HTTP)
@@ -434,7 +434,6 @@ int php_request_execute(php_request_context_t *ctx)
                  ctx->job_id ? ctx->job_id : "unknown",
                  safe_mem, safe_mem);
         zend_eval_string(server_cmd, NULL, "nativephp_env_setup");
-        RC_LOGI("[DIAG] job %s step=3c $_SERVER injected (type=%s, mem=%s)", ctx->job_id, jt_str, safe_mem);
     }
 
     /* ─── Inject CGI/request variables into $_SERVER for HTTP requests ───
@@ -485,7 +484,6 @@ int php_request_execute(php_request_context_t *ctx)
                  "$_SERVER['SERVER_PROTOCOL']='HTTP/1.1';",
                  method, esc_uri, esc_query, ctx->script_path);
         zend_eval_string(cgi_cmd, NULL, "inject_cgi_vars");
-        RC_LOGI("[DIAG] job %s step=3d CGI vars injected", ctx->job_id);
     }
 
     /* ─── Inject per-request HTTP headers into $_SERVER (thread-safe) ───
@@ -553,8 +551,6 @@ int php_request_execute(php_request_context_t *ctx)
             p = (*val_end) ? val_end + 1 : val_end;
         }
 
-        RC_LOGI("[DIAG] job %s step=3e HTTP headers injected into $_SERVER", ctx->job_id);
-
         /* Ensure HTTP_HOST always has a value — Laravel needs it for URL
          * generation.  If the client didn't send a Host header (unlikely
          * but possible), fall back to the process-env value set at init. */
@@ -564,37 +560,26 @@ int php_request_execute(php_request_context_t *ctx)
             NULL, "ensure_http_host");
     }
 
-    RC_LOGI("[DIAG] job %s step=4 BEFORE zend_first_try", ctx->job_id);
-
     /* Execute script in protected block */
     zend_first_try
     {
-        RC_LOGI("[DIAG] job %s step=5 INSIDE zend_first_try", ctx->job_id);
-
         /* Define STDOUT/STDERR only for console-style jobs. */
         if (ctx->job_type != JOB_TYPE_HTTP)
         {
-            RC_LOGI("[DIAG] job %s step=5a BEFORE patch_stdio eval", ctx->job_id);
             zend_eval_string(
                 "if (!defined('STDOUT')) define('STDOUT', fopen('php://output', 'w')); "
                 "if (!defined('STDERR')) define('STDERR', fopen('php://output', 'w'));",
                 NULL, "patch_stdio");
-            RC_LOGI("[DIAG] job %s step=5b AFTER patch_stdio eval", ctx->job_id);
         }
-
-        RC_LOGI("[DIAG] job %s step=6 BEFORE zend_stream_init_filename script=%s", ctx->job_id, ctx->script_path);
 
         zend_file_handle file_handle;
         zend_stream_init_filename(&file_handle, ctx->script_path);
-
-        RC_LOGI("[DIAG] job %s step=7 BEFORE php_execute_script", ctx->job_id);
 
         /* php_execute_script() returns bool: true on success, false on failure.
          * Do NOT compare against SUCCESS (which is 0 / zend_result) — that
          * inverts the check and makes every successful run appear as FAILURE. */
         if (php_execute_script(&file_handle))
         {
-            RC_LOGI("[DIAG] job %s step=8 php_execute_script returned SUCCESS", ctx->job_id);
             ctx->exit_code = EG(exit_status);
             if (ctx->exit_code == 0 && !atomic_load(&ctx->cancelled))
             {
@@ -653,7 +638,6 @@ int php_request_execute(php_request_context_t *ctx)
         }
         else
         {
-            RC_LOGI("[DIAG] job %s step=8 php_execute_script returned FAILURE", ctx->job_id);
             const char *last_message = PG(last_error_message)
                                            ? ZSTR_VAL(PG(last_error_message))
                                            : NULL;
@@ -689,7 +673,6 @@ int php_request_execute(php_request_context_t *ctx)
     }
     zend_catch
     {
-        RC_LOGI("[DIAG] job %s step=9 zend_catch triggered (bailout/exit)", ctx->job_id);
         ctx->exit_code = EG(exit_status);
         if (atomic_load(&ctx->cancelled))
         {
@@ -922,4 +905,22 @@ void php_request_increment_crash_count(php_request_context_t *ctx)
 {
     if (ctx)
         ctx->crash_count++;
+}
+
+void php_request_set_priority(php_request_context_t *ctx, int priority)
+{
+    if (ctx)
+    {
+        /* Clamp to [-10, +10] range */
+        if (priority < -10)
+            priority = -10;
+        if (priority > 10)
+            priority = 10;
+        ctx->priority = priority;
+    }
+}
+
+int php_request_get_priority(const php_request_context_t *ctx)
+{
+    return ctx ? ctx->priority : 0;
 }

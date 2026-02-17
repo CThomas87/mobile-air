@@ -32,6 +32,7 @@ $nativePhpLog('stage=bootstrap_start max_execution='.$maxExecutionSeconds.' sock
 
 // Capture OPcache status early (will be logged later with timing)
 $_opcacheInfo = 'unknown';
+
 if (function_exists('opcache_get_status')) {
     $opcacheStatus = @opcache_get_status(false);
     if ($opcacheStatus) {

@@ -90,10 +90,11 @@ class PhpEngine {
      * Enqueue a queue job for execution.
      *
      * - Parameter payload: JSON payload (or nil for auto-pop)
+     * - Parameter priority: Job priority (-10 to +10, 0 = normal, higher = more urgent)
      * - Returns: Job ID string, or nil on failure
      */
-    func enqueueQueueJob(payload: String? = nil) -> String? {
-        let cResult = supervisor_enqueue_queue_job(payload)
+    func enqueueQueueJob(payload: String? = nil, priority: Int32 = 0) -> String? {
+        let cResult = supervisor_enqueue_queue_job(payload, priority)
         guard let cResult = cResult else { return nil }
         let jobId = String(cString: cResult)
         free(cResult)

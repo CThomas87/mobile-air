@@ -54,7 +54,7 @@ class PHPBridge(private val context: Context) {
         private const val MAX_RAW_RESPONSE_CHARS = 2 * 1024 * 1024
 
         init {
-            System.loadLibrary("compat")
+            System.loadLibrary("compat") // JNI_OnLoad pre-loads libphp.so with RTLD_GLOBAL
             System.loadLibrary("php")
             System.loadLibrary("php_wrapper")
         }

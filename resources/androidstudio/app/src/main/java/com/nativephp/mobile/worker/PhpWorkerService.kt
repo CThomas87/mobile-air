@@ -1,5 +1,6 @@
 package com.nativephp.mobile.worker
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -230,7 +231,7 @@ class PhpWorkerService : Service() {
         val appBasePath = intent?.getStringExtra(EXTRA_APP_BASE_PATH) ?: ""
         val iniPath = intent?.getStringExtra(EXTRA_INI_PATH) ?: ""
         val workerCount = intent?.getIntExtra(EXTRA_WORKER_COUNT, DEFAULT_WORKER_COUNT) ?: DEFAULT_WORKER_COUNT
-        configuredWorkerCount = maxOf(workerCount, 1)
+        configuredWorkerCount = adjustWorkerCountByDeviceCapability(maxOf(workerCount, 1))
         val queues = intent?.getStringExtra(EXTRA_QUEUES) ?: DEFAULT_QUEUES
         val connection = intent?.getStringExtra(EXTRA_CONNECTION) ?: DEFAULT_CONNECTION
         val mode = intent?.getIntExtra(EXTRA_MODE, 0) ?: 0
@@ -522,6 +523,57 @@ class PhpWorkerService : Service() {
             PhpSupervisorBridge.nativeGetStatus()
         } else {
             "{\"status\":\"stopped\"}"
+        }
+    }
+
+    /**
+     * Determine optimal worker count based on device memory capability.
+     *
+     * Each worker thread holds a full TSRM interpreter context (~20-24MB
+     * without OPcache, ~16-20MB with). On low-memory devices we reduce
+     * concurrency to avoid OOM kills from the Android LMK (Low Memory Killer).
+     *
+     * Heuristic:
+     *   < 2 GB total RAM  → 1 worker
+     *   2-3 GB total RAM  → min(requested, 2)
+     *   3-6 GB total RAM  → min(requested, 3)
+     *   > 6 GB total RAM  → min(requested, 4)
+     *
+     * The available memory (not total) is also checked — if less than
+     * 256MB is free, we degrade to 1 worker regardless.
+     */
+    private fun adjustWorkerCountByDeviceCapability(requestedCount: Int): Int {
+        return try {
+            val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val memInfo = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memInfo)
+
+            val totalMb = memInfo.totalMem / (1024 * 1024)
+            val availableMb = memInfo.availMem / (1024 * 1024)
+
+            Log.i(TAG, "Device memory: total=${totalMb}MB, available=${availableMb}MB, lowMemory=${memInfo.lowMemory}")
+
+            // Emergency: very low available memory
+            if (availableMb < 256 || memInfo.lowMemory) {
+                Log.w(TAG, "Low memory detected (${availableMb}MB free), degrading to 1 worker")
+                return 1
+            }
+
+            val maxByRam = when {
+                totalMb < 2048  -> 1
+                totalMb < 3072  -> 2
+                totalMb < 6144  -> 3
+                else            -> 4
+            }
+
+            val adjusted = minOf(requestedCount, maxByRam)
+            if (adjusted != requestedCount) {
+                Log.i(TAG, "Adjusted worker count from $requestedCount to $adjusted based on device memory (${totalMb}MB)")
+            }
+            adjusted.coerceAtLeast(1)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to check device memory, using requested count", e)
+            requestedCount.coerceAtLeast(1)
         }
     }
 }

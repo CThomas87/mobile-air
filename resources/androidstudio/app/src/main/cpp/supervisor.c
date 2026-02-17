@@ -9,6 +9,12 @@
 #include "scheduler_gate.h"
 #include "zts_guard.h"
 
+/* Optional: native SQLite pool + queue peek (zero-PHP-overhead) */
+#ifdef NATIVEPHP_HAS_SQLITE3
+#include "sqlite_pool.h"
+#include "native_queue.h"
+#endif
+
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,6 +73,13 @@ static char s_memory_limit[32] = "256M";
 static char s_log_path[2048] = {0};
 static int s_log_max_size_kb = 1024;
 static pthread_mutex_t s_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Native SQLite pool + queue peek (behind NATIVEPHP_HAS_SQLITE3 flag) */
+#ifdef NATIVEPHP_HAS_SQLITE3
+static char s_db_path[2048] = {0};
+static int s_db_pool_size = 0;
+static sqlite_pool_t *s_sqlite_pool = NULL;
+#endif
 
 /* ─── Structured worker log ─── */
 static void sv_log_event(const char *event, const char *job_id, const char *detail)
@@ -250,6 +263,23 @@ int supervisor_start(supervisor_mode_t mode,
     atomic_store(&s_completed_jobs, 0);
     atomic_store(&s_failed_jobs, 0);
 
+    /* ─── Optional: create native SQLite connection pool ─── */
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (s_db_path[0] != '\0' && s_db_pool_size > 0)
+    {
+        s_sqlite_pool = sqlite_pool_create(s_db_path, s_db_pool_size);
+        if (s_sqlite_pool)
+        {
+            SV_LOGI("SQLite connection pool created: %d connections to %s",
+                    s_db_pool_size, s_db_path);
+        }
+        else
+        {
+            SV_LOGE("Failed to create SQLite pool (non-fatal, PHP will open its own connections)");
+        }
+    }
+#endif
+
     SV_LOGI("Supervisor started successfully");
     sv_log_event("supervisor_started", "", "");
 
@@ -286,6 +316,16 @@ void supervisor_stop(void)
         s_sched_gate = NULL;
     }
 
+    /* ─── Optional: destroy native SQLite connection pool ─── */
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (s_sqlite_pool)
+    {
+        sqlite_pool_destroy(s_sqlite_pool);
+        s_sqlite_pool = NULL;
+        SV_LOGI("SQLite connection pool destroyed");
+    }
+#endif
+
     /* Clean up environment */
     unsetenv("NATIVEPHP_QUEUE_CONNECTION");
     unsetenv("NATIVEPHP_QUEUE_NAMES");
@@ -304,7 +344,7 @@ supervisor_status_t supervisor_get_status(void)
     return s_status;
 }
 
-char *supervisor_enqueue_queue_job(const char *payload_json)
+char *supervisor_enqueue_queue_job(const char *payload_json, int priority)
 {
     if (s_status != SUPERVISOR_RUNNING)
     {
@@ -318,6 +358,34 @@ char *supervisor_enqueue_queue_job(const char *payload_json)
         return NULL;
     }
 
+    /*
+     * ─── Native queue peek (zero-PHP-overhead) ───
+     * If the db_path is configured AND no explicit payload was given,
+     * query the jobs table directly via SQLite C API.  If the queue is
+     * empty, skip the expensive PHP bootstrap entirely (~8-10s saved).
+     *
+     * When a payload IS provided (foreground immediate dispatch), we
+     * always proceed — the job was just inserted and may not be visible
+     * to our read-only snapshot yet.
+     */
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (s_db_path[0] != '\0' && payload_json == NULL)
+    {
+        native_queue_peek_result_t peek = native_queue_peek_multi(s_db_path, s_queues);
+        if (peek.error[0] == '\0' && !peek.has_jobs)
+        {
+            /* Queue is empty — skip PHP bootstrap */
+            sv_log_event("queue_empty_skip", "", s_queues);
+            return NULL;
+        }
+        /* If peek had an error, fall through to PHP (fail-safe) */
+        if (peek.error[0] != '\0')
+        {
+            SV_LOGI("Native queue peek error (non-fatal, falling through to PHP): %s", peek.error);
+        }
+    }
+#endif
+
     char *job_id = generate_job_id("queue");
     if (!job_id)
         return NULL;
@@ -330,6 +398,9 @@ char *supervisor_enqueue_queue_job(const char *payload_json)
         free(job_id);
         return NULL;
     }
+
+    /* Apply job priority */
+    php_request_set_priority(ctx, priority);
 
     if (worker_pool_submit(s_pool, ctx) != 0)
     {
@@ -501,7 +572,7 @@ char *supervisor_status_json(void)
     int pending = s_pool ? worker_pool_pending_count(s_pool) : 0;
     int sched_running = s_sched_gate ? scheduler_gate_is_running(s_sched_gate) : 0;
 
-    char *json = (char *)malloc(512);
+    char *json = (char *)malloc(1024);
     if (!json)
         return strdup("{\"status\":\"error\"}");
 
@@ -510,15 +581,38 @@ char *supervisor_status_json(void)
     int64_t uptime = (s_started_at > 0) ? ((int64_t)now_ts.tv_sec - s_started_at) : 0;
     unsigned int completed = atomic_load(&s_completed_jobs);
     unsigned int failed = atomic_load(&s_failed_jobs);
+    unsigned int total = completed + failed;
+    double failure_rate = (total > 0) ? ((double)failed / (double)total * 100.0) : 0.0;
 
-    snprintf(json, 512,
+    /* SQLite pool stats (if available) */
+    int pool_available = 0;
+    int pool_total = 0;
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (s_sqlite_pool)
+    {
+        pool_available = sqlite_pool_available_count(s_sqlite_pool);
+        pool_total = sqlite_pool_total_count(s_sqlite_pool);
+    }
+#endif
+
+    snprintf(json, 1024,
              "{\"status\":\"%s\",\"activeJobs\":%d,\"pendingJobs\":%d,"
              "\"completedJobs\":%u,\"failedJobs\":%u,"
-             "\"schedulerRunning\":%s,\"uptimeSeconds\":%lld,\"mode\":%d}",
+             "\"failureRatePercent\":%.1f,"
+             "\"schedulerRunning\":%s,\"uptimeSeconds\":%lld,\"mode\":%d,"
+             "\"workerCount\":%d,"
+             "\"circuitBreakerMax\":%d,\"circuitBreakerBackoff\":%d,"
+             "\"sqlitePool\":{\"available\":%d,\"total\":%d},"
+             "\"memoryLimit\":\"%s\"}",
              status_str, active, pending, completed, failed,
+             failure_rate,
              sched_running ? "true" : "false",
              (long long)uptime,
-             (int)s_mode);
+             (int)s_mode,
+             s_pool ? worker_pool_worker_count(s_pool) : 0,
+             s_cb_max_crashes, s_cb_base_backoff_sec,
+             pool_available, pool_total,
+             s_memory_limit);
 
     return json;
 }
@@ -593,6 +687,36 @@ const char *supervisor_get_memory_limit(void)
     memcpy(tls_mem_limit, s_memory_limit, sizeof(tls_mem_limit));
     pthread_mutex_unlock(&s_sv_mutex);
     return tls_mem_limit;
+}
+
+/* ─── Native SQLite pool + queue peek configuration ─── */
+
+void supervisor_set_db_path(const char *db_path, int pool_size)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (db_path)
+    {
+        strncpy(s_db_path, db_path, sizeof(s_db_path) - 1);
+        s_db_path[sizeof(s_db_path) - 1] = '\0';
+        s_db_pool_size = (pool_size > 0) ? pool_size : 0;
+        SV_LOGI("Database path set: %s (pool_size=%d)", s_db_path, s_db_pool_size);
+    }
+#else
+    (void)db_path;
+    (void)pool_size;
+    SV_LOGI("supervisor_set_db_path called but NATIVEPHP_HAS_SQLITE3 not defined (no-op)");
+#endif
+}
+
+char *supervisor_queue_status_json(void)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (s_db_path[0] != '\0')
+    {
+        return native_queue_status_json(s_db_path);
+    }
+#endif
+    return strdup("{\"error\":\"db_path not configured\"}");
 }
 
 void supervisor_engine_shutdown(void)

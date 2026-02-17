@@ -244,6 +244,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | OPcache File Cache
+    |--------------------------------------------------------------------------
+    |
+    | In addition to shared memory (SHM), OPcache can persist compiled bytecode
+    | to disk. On cold boot, this avoids recompiling ~200+ framework files,
+    | reducing first-boot bootstrap time by 30-50%.
+    |
+    | The file cache directory is auto-created inside the app's storage path.
+    | Set to false to disable file cache (SHM-only mode).
+    |
+    | Env: NATIVEPHP_OPCACHE_FILE_CACHE
+    |
+    */
+    'opcache_file_cache' => env('NATIVEPHP_OPCACHE_FILE_CACHE', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Redis Queue Backend
     |--------------------------------------------------------------------------
     |
@@ -262,6 +279,41 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Android Execution Strategy
+    |--------------------------------------------------------------------------
+    |
+    | Controls how background work is executed on Android:
+    |
+    |   'auto'          — Auto-detect: uses WorkManager on Android 14+ (API 34+),
+    |                     Foreground Service on older versions (recommended).
+    |   'foreground'    — Always use Foreground Service (PhpWorkerService.kt).
+    |                     6-hour limit on Android 14+ for dataSync type.
+    |   'workmanager'   — Always use WorkManager (PhpPeriodicWorker.kt).
+    |                     15-minute minimum interval, more battery-friendly.
+    |
+    | WorkManager is better for periodic/batch work. Foreground Service is
+    | better for real-time queue processing with <500ms latency.
+    |
+    | Env: NATIVEPHP_ANDROID_EXECUTION_STRATEGY
+    |
+    */
+    'android_execution_strategy' => env('NATIVEPHP_ANDROID_EXECUTION_STRATEGY', 'auto'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | WorkManager Repeat Interval (minutes)
+    |--------------------------------------------------------------------------
+    |
+    | When using WorkManager strategy, how often to schedule periodic work.
+    | Android enforces a minimum of 15 minutes.
+    |
+    | Env: NATIVEPHP_WORKMANAGER_INTERVAL_MINUTES
+    |
+    */
+    'workmanager_interval_minutes' => env('NATIVEPHP_WORKMANAGER_INTERVAL_MINUTES', 15),
+
+    /*
+    |--------------------------------------------------------------------------
     | Build-Time Config Cache
     |--------------------------------------------------------------------------
     |
@@ -273,5 +325,49 @@ return [
     |
     */
     'config_cache_enabled' => env('NATIVEPHP_CONFIG_CACHE_ENABLED', true),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Database Connection Pool
+    |--------------------------------------------------------------------------
+    |
+    | Number of pre-opened SQLite connections to pool for worker threads.
+    | Reduces connection overhead and ensures all connections share the
+    | same WAL mode and PRAGMA configuration.
+    |
+    | Set to 0 to disable pooling (each thread opens its own connection).
+    | The native C pool (NATIVEPHP_ENABLE_SQLITE_MODULES) provides even
+    | better performance when compiled in.
+    |
+    | Env: NATIVEPHP_DB_POOL_SIZE
+    |
+    */
+    'db_pool_size' => env('NATIVEPHP_DB_POOL_SIZE', 4),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Job Priority Queue Mapping
+    |--------------------------------------------------------------------------
+    |
+    | Maps Laravel queue names to native priority levels (-10 to +10).
+    | Higher values are processed first. Default queue priority is 0.
+    |
+    | Example:
+    |   'priority_map' => [
+    |       'high'     => 5,
+    |       'default'  => 0,
+    |       'low'      => -5,
+    |       'bulk'     => -10,
+    |   ]
+    |
+    | Jobs dispatched to the 'high' queue will be dequeued before 'default'
+    | and 'low' jobs at the native thread pool level.
+    |
+    */
+    'priority_map' => [
+        'high'    => 5,
+        'default' => 0,
+        'low'     => -5,
+    ],
 
 ];

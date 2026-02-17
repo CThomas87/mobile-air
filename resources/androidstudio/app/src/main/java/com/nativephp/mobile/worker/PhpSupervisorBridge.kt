@@ -42,10 +42,11 @@ object PhpSupervisorBridge {
      * Enqueue a queue job for execution.
      *
      * @param payloadJson JSON string with job payload (or empty for auto-pop)
+     * @param priority Job priority (-10 to +10, 0 = normal, higher = more urgent)
      * @return Job ID string, or null on failure
      */
     @JvmStatic
-    external fun nativeEnqueueQueueJob(payloadJson: String): String?
+    external fun nativeEnqueueQueueJob(payloadJson: String, priority: Int = 0): String?
 
     /**
      * Enqueue a scheduler tick for execution.
@@ -129,7 +130,7 @@ object PhpSupervisorBridge {
         // Native libraries are already loaded by PHPBridge companion init.
         // If this runs before PHPBridge, ensure libs are loaded:
         try {
-            System.loadLibrary("compat")
+            System.loadLibrary("compat") // JNI_OnLoad pre-loads libphp.so with RTLD_GLOBAL
             System.loadLibrary("php")
             System.loadLibrary("php_wrapper")
         } catch (e: UnsatisfiedLinkError) {

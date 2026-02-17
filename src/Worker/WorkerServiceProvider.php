@@ -219,6 +219,7 @@ class WorkerServiceProvider extends ServiceProvider
             if (flock($fp, LOCK_EX)) {
                 try {
                     $this->ensureQueueTablesExist();
+                    WorkerErrorReporter::ensureTableExists();
                     $this->ensureConfigCached();
                 } finally {
                     flock($fp, LOCK_UN);
@@ -323,28 +324,78 @@ class WorkerServiceProvider extends ServiceProvider
         @ini_set('opcache.validate_timestamps', '0'); // Immutable on device
         @ini_set('opcache.save_comments', '1'); // Required for annotations
         @ini_set('opcache.file_update_protection', '0'); // No filesystem races on mobile
+
+        // OPcache file cache — persist compiled bytecode to disk for faster cold boots.
+        // On first boot this populates the cache; on subsequent boots, OPcache loads
+        // pre-compiled bytecode from disk instead of recompiling ~200+ framework files.
+        if (WorkerConfig::opcacheFileCache()) {
+            $fileCachePath = WorkerConfig::opcacheFileCachePath();
+
+            // Ensure the cache directory exists
+            if (! is_dir($fileCachePath)) {
+                @mkdir($fileCachePath, 0775, true);
+            }
+
+            if (is_dir($fileCachePath) && is_writable($fileCachePath)) {
+                @ini_set('opcache.file_cache', $fileCachePath);
+                @ini_set('opcache.file_cache_only', '0'); // Use SHM + file cache (hybrid)
+                @ini_set('opcache.file_cache_consistency_checks', '0'); // Trust the cache
+            }
+        }
     }
 
     /**
      * Ensure Laravel config is cached for faster worker bootstrap.
      *
-     * NOTE: We intentionally do NOT call Artisan::call('config:cache') at
-     * runtime.  That command creates a fresh Application via
-     * getFreshConfiguration(), which re-triggers the entire service provider
-     * boot chain.  With 3 worker threads doing this simultaneously in ZTS
-     * mode, it causes 6+ concurrent Application bootstraps fighting over
-     * SQLite and filesystem writes — far too expensive on mobile.
+     * Full Artisan::call('config:cache') is NOT safe at runtime because it
+     * creates a fresh Application → re-triggers all service providers →
+     * 6+ concurrent bootstraps in ZTS mode.
      *
-     * Config caching should be done at build time (native:build) or during
-     * the Kotlin runBaseArtisanCommands() step.  At runtime we only check
-     * whether a cache already exists (no-op fast path).
+     * Instead we use a lightweight approach:
+     *  1. Check if bootstrap/cache/config.php already exists (build-time).
+     *  2. If not, generate it ONCE under the flock() guard by serializing
+     *     the already-loaded config repository to a PHP return array.
+     *  3. A marker file prevents re-generation on subsequent worker boots.
+     *
+     * This avoids spawning a fresh Application while still giving all
+     * threads the benefit of a cached config on subsequent boots.
      */
     protected function ensureConfigCached(): void
     {
-        // Config caching at runtime is intentionally disabled.
-        // If a cache already exists (from build time), Laravel uses it
-        // automatically.  If it doesn't exist, workers load config files
-        // normally — a few hundred ms overhead but no crash risk.
+        $cachePath = $this->app->bootstrapPath('cache/config.php');
+
+        // Fast path: cache already exists (from build-time or previous first-boot)
+        if (file_exists($cachePath)) {
+            return;
+        }
+
+        // Marker prevents repeated attempts if generation fails
+        $markerPath = $this->app->storagePath('framework/.config_cache_attempted');
+        if (file_exists($markerPath)) {
+            return;
+        }
+
+        try {
+            @file_put_contents($markerPath, (string) time());
+
+            // Serialize the already-resolved config (no fresh Application needed)
+            $config = $this->app->make('config')->all();
+
+            $content = '<?php return ' . var_export($config, true) . ';' . PHP_EOL;
+
+            $dir = dirname($cachePath);
+            if (! is_dir($dir)) {
+                @mkdir($dir, 0775, true);
+            }
+
+            // Atomic write via temp file + rename
+            $tmpPath = $cachePath . '.' . getmypid() . '.tmp';
+            if (@file_put_contents($tmpPath, $content) !== false) {
+                @rename($tmpPath, $cachePath);
+            }
+        } catch (\Throwable $e) {
+            // Non-fatal — workers continue with file-based config loading
+        }
     }
 
 }

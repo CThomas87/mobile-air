@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_INI_ZEND_ZEND_INI_PARSER_H_INCLUDED
-# define YY_INI_ZEND_ZEND_INI_PARSER_H_INCLUDED
+#ifndef YY_INI_HOME_CHRIS_BUILD_PHP_ANDROID_PHP_SRC_ZEND_ZEND_INI_PARSER_H_INCLUDED
+# define YY_INI_HOME_CHRIS_BUILD_PHP_ANDROID_PHP_SRC_ZEND_ZEND_INI_PARSER_H_INCLUDED
 /* Debug traces.  */
 #ifndef INI_DEBUG
 # if defined YYDEBUG
@@ -95,4 +95,4 @@ typedef zval INI_STYPE;
 int ini_parse (void);
 
 
-#endif /* !YY_INI_ZEND_ZEND_INI_PARSER_H_INCLUDED  */
+#endif /* !YY_INI_HOME_CHRIS_BUILD_PHP_ANDROID_PHP_SRC_ZEND_ZEND_INI_PARSER_H_INCLUDED  */

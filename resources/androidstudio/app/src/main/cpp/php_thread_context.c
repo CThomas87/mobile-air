@@ -22,8 +22,20 @@
 #define TC_LOGI(...) __android_log_print(ANDROID_LOG_INFO, TC_TAG, __VA_ARGS__)
 #define TC_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TC_TAG, __VA_ARGS__)
 #else
-#define TC_LOGI(...) do { fprintf(stdout, "[PhpThreadCtx] "); fprintf(stdout, __VA_ARGS__); fprintf(stdout, "\n"); } while(0)
-#define TC_LOGE(...) do { fprintf(stderr, "[PhpThreadCtx] ERROR: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#define TC_LOGI(...)                        \
+    do                                      \
+    {                                       \
+        fprintf(stdout, "[PhpThreadCtx] "); \
+        fprintf(stdout, __VA_ARGS__);       \
+        fprintf(stdout, "\n");              \
+    } while (0)
+#define TC_LOGE(...)                               \
+    do                                             \
+    {                                              \
+        fprintf(stderr, "[PhpThreadCtx] ERROR: "); \
+        fprintf(stderr, __VA_ARGS__);              \
+        fprintf(stderr, "\n");                     \
+    } while (0)
 #endif
 
 /*
@@ -41,12 +53,14 @@ static __thread int tls_attached = 0;
 
 int php_thread_attach(void)
 {
-    if (!php_engine_is_initialized()) {
+    if (!php_engine_is_initialized())
+    {
         TC_LOGE("Cannot attach thread: engine not initialized");
         return -1;
     }
 
-    if (tls_attached) {
+    if (tls_attached)
+    {
         TC_LOGI("Thread already attached (tid=%lu)", (unsigned long)pthread_self());
         return 0;
     }
@@ -60,12 +74,20 @@ int php_thread_attach(void)
      * that replaced the removed tsrm_new/set_interpreter_context() calls.
      */
     void *new_ctx = ts_resource(0);
-    if (!new_ctx) {
+    if (!new_ctx)
+    {
         TC_LOGE("ts_resource(0) failed");
         return -1;
     }
     /* Update the thread-local TSRM cache */
     TSRMLS_CACHE_UPDATE();
+
+    /* Fix opcache.so's emutls TLS for this worker thread.
+     * On Android, each DSO has its own _tsrm_ls_cache TLS variable.
+     * TSRMLS_CACHE_UPDATE() only sets THIS DSO's copy.  opcache.so's
+     * copy would remain NULL, causing SIGSEGV in accel_activate().
+     * This function sets opcache.so's copy via __emutls_get_address(). */
+    fix_opcache_tls_cache();
 
     tls_attached = 1;
     TC_LOGI("Thread attached successfully (tid=%lu)", (unsigned long)pthread_self());
@@ -78,7 +100,8 @@ int php_thread_attach(void)
 
 void php_thread_detach(void)
 {
-    if (!tls_attached) {
+    if (!tls_attached)
+    {
         TC_LOGI("Thread not attached, nothing to detach (tid=%lu)", (unsigned long)pthread_self());
         return;
     }

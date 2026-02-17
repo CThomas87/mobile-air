@@ -1123,10 +1123,10 @@ JNIEXPORT void JNICALL native_supervisor_stop(JNIEnv *env, jclass clazz)
 }
 
 JNIEXPORT jstring JNICALL native_supervisor_enqueue_queue_job(JNIEnv *env, jclass clazz,
-                                                              jstring jPayload)
+                                                              jstring jPayload, jint jPriority)
 {
     const char *payload = (*env)->GetStringUTFChars(env, jPayload, NULL);
-    char *jobId = supervisor_enqueue_queue_job((strlen(payload) > 0) ? payload : NULL);
+    char *jobId = supervisor_enqueue_queue_job((strlen(payload) > 0) ? payload : NULL, (int)jPriority);
     (*env)->ReleaseStringUTFChars(env, jPayload, payload);
 
     if (jobId)
@@ -1245,7 +1245,7 @@ static JNINativeMethod gSupervisorMethods[] = {
     {"nativeEngineInit", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z", (void *)native_supervisor_engine_init},
     {"nativeStartSupervisor", "(IILjava/lang/String;Ljava/lang/String;)Z", (void *)native_supervisor_start},
     {"nativeStopSupervisor", "()V", (void *)native_supervisor_stop},
-    {"nativeEnqueueQueueJob", "(Ljava/lang/String;)Ljava/lang/String;", (void *)native_supervisor_enqueue_queue_job},
+    {"nativeEnqueueQueueJob", "(Ljava/lang/String;I)Ljava/lang/String;", (void *)native_supervisor_enqueue_queue_job},
     {"nativeEnqueueSchedulerTick", "(Ljava/lang/String;)Ljava/lang/String;", (void *)native_supervisor_enqueue_scheduler_tick},
     {"nativeAwaitJob", "(Ljava/lang/String;I)Ljava/lang/String;", (void *)native_supervisor_await_job},
     {"nativeCancelJob", "(Ljava/lang/String;)Z", (void *)native_supervisor_cancel_job},

@@ -40,6 +40,7 @@ add_library(compat SHARED
 target_link_libraries(compat
         android
         log
+        dl
 )
 
 
@@ -69,6 +70,42 @@ add_library(php_wrapper SHARED
         scheduler_gate.c
         supervisor.c
 )
+
+# ─── Optional: SQLite connection pool + native queue ───
+# These modules require sqlite3.h (not bundled in NDK).
+# To enable: place the SQLite amalgamation (sqlite3.h + sqlite3.c) in
+#   cpp/include/sqlite3/
+# Then pass -DNATIVEPHP_SQLITE_DIR=<path> to cmake, or set
+# NATIVEPHP_ENABLE_SQLITE_MODULES=ON with the header available.
+option(NATIVEPHP_ENABLE_SQLITE_MODULES "Build SQLite pool and native queue modules" OFF)
+
+if(NATIVEPHP_ENABLE_SQLITE_MODULES)
+    # Look for sqlite3.h in the include path
+    find_path(SQLITE3_INCLUDE_DIR sqlite3.h
+        HINTS ${CMAKE_CURRENT_SOURCE_DIR}/include/sqlite3
+              ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    if(SQLITE3_INCLUDE_DIR)
+        message(STATUS "SQLite3 header found at ${SQLITE3_INCLUDE_DIR}")
+        target_sources(php_wrapper PRIVATE
+            sqlite_pool.c
+            native_queue.c
+        )
+        target_include_directories(php_wrapper PRIVATE ${SQLITE3_INCLUDE_DIR})
+        target_compile_definitions(php_wrapper PRIVATE NATIVEPHP_HAS_SQLITE3=1)
+
+        # If the SQLite amalgamation .c is present, compile it in;
+        # otherwise assume SQLite symbols come from libphp.so at runtime.
+        if(EXISTS "${SQLITE3_INCLUDE_DIR}/sqlite3.c")
+            target_sources(php_wrapper PRIVATE "${SQLITE3_INCLUDE_DIR}/sqlite3.c")
+            message(STATUS "SQLite3 amalgamation compiled into php_wrapper")
+        else()
+            message(STATUS "SQLite3 symbols expected from libphp.so (dynamic)")
+        endif()
+    else()
+        message(WARNING "NATIVEPHP_ENABLE_SQLITE_MODULES=ON but sqlite3.h not found; skipping")
+    endif()
+endif()
 
 target_include_directories(php_wrapper PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -105,6 +142,47 @@ if(ZTS_FOUND GREATER -1)
     message(STATUS "ZTS confirmed in php_config.h — multi-worker mode available.")
 endif()
 
+# ─── Glob C++ Linkage Fix (permanent, runs every configure) ───
+# php_config.h is auto-generated and may declare glob()/globfree() without
+# extern "C" guards. When included from C++ translation units (.cpp files),
+# this causes "declaration has a different language linkage" errors.
+# Detect and patch at configure time so the fix survives header regeneration.
+set(_PHP_CONFIG_H_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/php_config.h")
+string(FIND "${PHP_CONFIG_CONTENT}" "int glob(const char" _GLOB_POS)
+if(NOT _GLOB_POS EQUAL -1)
+    # Check whether extern "C" already appears shortly before the glob prototype
+    set(_NEEDS_GLOB_PATCH TRUE)
+    if(_GLOB_POS GREATER 60)
+        math(EXPR _SEARCH_START "${_GLOB_POS} - 60")
+        string(SUBSTRING "${PHP_CONFIG_CONTENT}" ${_SEARCH_START} 60 _BEFORE_GLOB)
+        string(FIND "${_BEFORE_GLOB}" "extern" _EC_NEARBY)
+        if(NOT _EC_NEARBY EQUAL -1)
+            set(_NEEDS_GLOB_PATCH FALSE)
+        endif()
+    endif()
+
+    if(_NEEDS_GLOB_PATCH)
+        message(STATUS "Patching php_config.h: wrapping glob/globfree in extern \"C\" for C++ compatibility")
+        # Replace the bare prototypes with extern "C" wrapped versions
+        string(REPLACE
+            "int glob(const char *, int, int (*)(const char *, int), glob_t *);"
+            "#ifdef __cplusplus\nextern \"C\" {\n#endif\nint glob(const char *, int, int (*)(const char *, int), glob_t *);"
+            _PATCHED_CONTENT "${PHP_CONFIG_CONTENT}"
+        )
+        string(REPLACE
+            "void globfree(glob_t *);"
+            "void globfree(glob_t *);\n#ifdef __cplusplus\n}\n#endif"
+            _PATCHED_CONTENT "${_PATCHED_CONTENT}"
+        )
+        file(WRITE "${_PHP_CONFIG_H_PATH}" "${_PATCHED_CONTENT}")
+        message(STATUS "php_config.h patched successfully")
+    else()
+        message(STATUS "php_config.h glob prototypes already wrapped in extern \"C\" — no patch needed")
+    endif()
+else()
+    message(STATUS "No glob prototypes found in php_config.h — no patch needed")
+endif()
+
 target_compile_definitions(php_wrapper PRIVATE
         NATIVEPHP_REQUIRE_ZTS=1
 )
@@ -121,3 +199,4 @@ add_custom_command(
         COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:compat> ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/
         COMMAND ${CMAKE_COMMAND} -E copy ${PHP_LIB_DIR}/libphp.so ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/
 )
+

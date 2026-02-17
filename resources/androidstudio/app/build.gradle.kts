@@ -211,6 +211,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$camerax_version")
     implementation("androidx.camera:camera-lifecycle:$camerax_version")
     implementation("androidx.camera:camera-view:$camerax_version")
+
+    // WorkManager for background job processing (Android 14+ FGS alternative)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 }
 
 // Bundle task verification will be handled by the signing configuration itself

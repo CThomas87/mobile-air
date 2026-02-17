@@ -736,7 +736,10 @@ class LaravelEnvironment(private val context: Context) {
             Log.i(TAG, "📱 Android SUPPORTED_64_BIT_ABIS=${Build.SUPPORTED_64_BIT_ABIS.joinToString(",")}")
             Log.i(TAG, "📦 nativeLibraryDir=${context.applicationInfo.nativeLibraryDir}")
 
-            val ok = PhpSupervisorBridge.nativeEngineInit("", "", appBasePath)
+            // Pass the php.ini directory so PHP loads OPcache during module startup
+            // (php_ini_ignore=0 when ini_path is non-empty)
+            val phpIniDir = context.filesDir.absolutePath
+            val ok = PhpSupervisorBridge.nativeEngineInit(phpIniDir, "", appBasePath)
             if (ok) {
                 Log.i(TAG, "✅ PHP engine initialized successfully")
             } else {
@@ -1151,12 +1154,41 @@ class LaravelEnvironment(private val context: Context) {
                 Log.d(TAG, "🔍 Certificate copy - DEBUG mode: $isDebugMode")
                 copyAssetToInternalStorage(CACERT_FILE, CACERT_FILE, forceUpdate = isDebugMode)
 
+                // ─── Build php.ini with OPcache support ───
+                // OPcache is loaded manually by custom_module_startup() in
+                // php_engine.c (Step 2).  zend_extension= is intentionally
+                // omitted to avoid the emutls TLS crash during php_module_startup.
+                // The opcache.* settings here go into configuration_hash and are
+                // picked up when accel_startup() calls REGISTER_INI_ENTRIES().
+                val nativeLibDir = context.applicationInfo.nativeLibraryDir
+                val opcacheFileCacheDir = File(appStorageDir, "$DIR_LARAVEL/storage/framework/opcache").absolutePath
+
+                // Ensure OPcache file cache directory exists
+                File(opcacheFileCacheDir).mkdirs()
+
                 val phpIni = """
 curl.cainfo="${context.filesDir.absolutePath}/$CACERT_FILE"
 openssl.cafile="${context.filesDir.absolutePath}/$CACERT_FILE"
+log_errors=1
+display_errors=1
+error_reporting=E_ALL
+extension_dir="$nativeLibDir"
+opcache.enable=1
+opcache.enable_cli=1
+opcache.memory_consumption=32
+opcache.interned_strings_buffer=8
+opcache.max_accelerated_files=4000
+opcache.validate_timestamps=0
+opcache.save_comments=1
+opcache.file_update_protection=0
+opcache.file_cache="$opcacheFileCacheDir"
+opcache.file_cache_only=1
+opcache.file_cache_consistency_checks=0
+opcache.jit=disable
+opcache.jit_buffer_size=0
 """
                 File(context.filesDir, PHP_INI_FILE).writeText(phpIni)
-                Log.d(TAG, "✅ PHP ini configured with certificate path")
+                Log.d(TAG, "✅ PHP ini configured with certificate path and OPcache (ext_dir=$nativeLibDir)")
             } catch (e: Exception) {
                 Log.e(TAG, "❌ Failed to copy or set CURL_CA_BUNDLE", e)
             }

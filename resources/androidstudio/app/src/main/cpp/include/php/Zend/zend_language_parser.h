@@ -35,8 +35,8 @@
    especially those whose name start with YY_ or yy_.  They are
    private implementation details that can be changed or removed.  */
 
-#ifndef YY_ZEND_ZEND_ZEND_LANGUAGE_PARSER_H_INCLUDED
-# define YY_ZEND_ZEND_ZEND_LANGUAGE_PARSER_H_INCLUDED
+#ifndef YY_ZEND_HOME_CHRIS_BUILD_PHP_ANDROID_PHP_SRC_ZEND_ZEND_LANGUAGE_PARSER_H_INCLUDED
+# define YY_ZEND_HOME_CHRIS_BUILD_PHP_ANDROID_PHP_SRC_ZEND_ZEND_LANGUAGE_PARSER_H_INCLUDED
 /* Debug traces.  */
 #ifndef ZENDDEBUG
 # if defined YYDEBUG
@@ -53,9 +53,11 @@
 extern int zenddebug;
 #endif
 /* "%code requires" blocks.  */
+#line 41 "/home/chris/build/php-android/php-src/Zend/zend_language_parser.y"
 
 #include "zend_compile.h"
 
+#line 61 "/home/chris/build/php-android/php-src/Zend/zend_language_parser.h"
 
 /* Token kinds.  */
 #ifndef ZENDTOKENTYPE
@@ -236,4 +238,4 @@ typedef zend_parser_stack_elem ZENDSTYPE;
 ZEND_API int zendparse (void);
 
 
-#endif /* !YY_ZEND_ZEND_ZEND_LANGUAGE_PARSER_H_INCLUDED  */
+#endif /* !YY_ZEND_HOME_CHRIS_BUILD_PHP_ANDROID_PHP_SRC_ZEND_ZEND_LANGUAGE_PARSER_H_INCLUDED  */

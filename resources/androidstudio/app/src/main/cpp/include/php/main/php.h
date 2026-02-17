@@ -1,6 +1,3 @@
-#ifdef __ANDROID__
-#include "android_compat.h"
-#endif
 /*
    +----------------------------------------------------------------------+
    | Copyright (c) The PHP Group                                          |

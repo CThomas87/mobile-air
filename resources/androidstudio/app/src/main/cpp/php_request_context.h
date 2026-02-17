@@ -164,6 +164,14 @@ extern "C"
     int php_request_get_crash_count(const php_request_context_t *ctx);
     void php_request_increment_crash_count(php_request_context_t *ctx);
 
+    /**
+     * Job priority (higher = more urgent).
+     * Default: 0 (normal). Range: -10 (low) to +10 (high).
+     * Used by the worker pool for priority queue insertion.
+     */
+    void php_request_set_priority(php_request_context_t *ctx, int priority);
+    int php_request_get_priority(const php_request_context_t *ctx);
+
 #ifdef __cplusplus
 }
 #endif
