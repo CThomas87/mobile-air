@@ -678,7 +678,7 @@ The `NATIVEPHP_ANDROID_EXECUTION_STRATEGY` setting controls how background work 
 
 1. Check logcat: `adb logcat -s PhpEngine:*` — look for `execute_ex visible at`
 2. If you see `cannot locate symbol "execute_ex"`: the RTLD_GLOBAL promotion failed
-3. Ensure `php_engine.c` uses `RTLD_NOW | RTLD_GLOBAL` without `RTLD_NOLOAD`
+3. Ensure `android_compat.cpp`'s `JNI_OnLoad` pre-loads libphp.so with `RTLD_NOW | RTLD_GLOBAL` (loaded via `System.loadLibrary("compat")` before `"php"`)
 4. Verify libphp.so exports the symbol: `nm -D libphp.so | grep execute_ex`
 
 ### Worker errors not appearing in dashboard

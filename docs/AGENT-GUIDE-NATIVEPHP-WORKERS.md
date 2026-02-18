@@ -13,18 +13,19 @@ and a **safe troubleshooting workflow**.
 
 ### Android Native Layer (C / Kotlin)
 
-| File                                                                                          | Purpose                                                                                                                            |
-| --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `resources/androidstudio/app/src/main/cpp/php_preloader.c`                                    | Tiny JNI library loaded BEFORE libphp.so. Loads libphp.so with RTLD_GLOBAL to fix Bionic API 36+ symbol visibility for opcache.so. |
-| `resources/androidstudio/app/src/main/cpp/php_engine.c`                                       | Process-wide PHP engine singleton. OPcache probe/warmup, INI config, fork() deadlock prevention, RTLD_GLOBAL fallback.             |
-| `resources/androidstudio/app/src/main/cpp/worker_pool.c`                                      | Native pthread pool (1–4 workers). Condvar-based job queue, circuit breaker, staggered starts, UI-lane priority yielding.          |
-| `resources/androidstudio/app/src/main/cpp/supervisor.c`                                       | Top-level orchestrator. Owns engine + pool + gate lifecycle, structured JSON logging, `supervisor_status_json()`.                  |
-| `resources/androidstudio/app/src/main/cpp/scheduler_gate.c`                                   | Mutex ensuring `schedule:run` never overlaps (atomic CAS, reject-not-queue).                                                       |
-| `resources/androidstudio/app/src/main/cpp/php_request_context.c`                              | Per-job isolated execution: thread-local stdout/stderr, `$_SERVER` injection, cooperative cancellation via Zend VM interrupt.      |
-| `resources/androidstudio/app/src/main/cpp/php_thread_context.c`                               | Per-thread TSRM attach/detach (`ts_resource(0)` + `TSRMLS_CACHE_UPDATE()`).                                                        |
-| `resources/androidstudio/app/src/main/cpp/php_bridge.c`                                       | JNI bridge Kotlin↔PHP. Includes `native_set_env()` guard that blocks `setenv()` once engine is running.                            |
-| `resources/androidstudio/app/src/main/java/com/nativephp/mobile/worker/PhpWorkerService.kt`   | Android Foreground Service (FGS type `dataSync`). WakeLock, polling loops, `supervisor_*` JNI calls.                               |
-| `resources/androidstudio/app/src/main/java/com/nativephp/mobile/bridge/LaravelEnvironment.kt` | App bootstrap: directory creation, OTA update, env vars, migrations, engine init.                                                  |
+| File                                                                                          | Purpose                                                                                                                                                                                                 |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resources/androidstudio/app/src/main/cpp/compat/android_compat.cpp`                          | **Primary RTLD_GLOBAL preloader.** `JNI_OnLoad` loads libphp.so with `RTLD_GLOBAL` before `System.loadLibrary("php")`. Also provides `getdtablesize()` and `copy_file_range()` Bionic polyfills.        |
+| `resources/androidstudio/app/src/main/cpp/php_engine.h`                                       | Process-wide PHP engine singleton interface. Declares `php_engine_init()`, `fix_opcache_tls_cache()`, `fix_opcache_per_thread_state()`. **Note: `.c` file is in CMakeLists.txt but not yet committed.** |
+| `resources/androidstudio/app/src/main/cpp/worker_pool.c`                                      | Native pthread pool (1–4 workers). Condvar-based job queue, circuit breaker, staggered starts, UI-lane priority yielding.                                                                               |
+| `resources/androidstudio/app/src/main/cpp/supervisor.c`                                       | Top-level orchestrator. Owns engine + pool + gate lifecycle, structured JSON logging, `supervisor_status_json()`. Default memory limit: `256M`.                                                         |
+| `resources/androidstudio/app/src/main/cpp/scheduler_gate.c`                                   | Mutex ensuring `schedule:run` never overlaps (atomic CAS, reject-not-queue).                                                                                                                            |
+| `resources/androidstudio/app/src/main/cpp/php_request_context.h`                              | Per-job isolated execution context interface. Declares `php_request_create()`, `php_request_execute()`, job status/type enums. **Note: `.c` file is in CMakeLists.txt but not yet committed.**          |
+| `resources/androidstudio/app/src/main/cpp/php_thread_context.c`                               | Per-thread TSRM attach/detach (`ts_resource(0)` + `TSRMLS_CACHE_UPDATE()`). Defines `TSRMLS_CACHE_DEFINE()` to avoid emutls descriptor conflicts.                                                       |
+| `resources/androidstudio/app/src/main/cpp/bridge_jni.cpp`                                     | JNI bridge for `BridgeRouterKt` can/call API. Caches `nativePHPCan`/`nativePHPCall` method IDs. Replaces the former `php_bridge.c`.                                                                     |
+| `resources/androidstudio/app/src/main/cpp/libphp_wrapper.cpp`                                 | libphp.so dlopen wrapper with RTLD_GLOBAL. Re-opens `libphp.so`, `libcompat.so`, and `libphp_wrapper.so` with `RTLD_GLOBAL` via C++ constructor attributes.                                             |
+| `resources/androidstudio/app/src/main/java/com/nativephp/mobile/worker/PhpWorkerService.kt`   | Android Foreground Service (FGS type `dataSync`). WakeLock, polling loops, `supervisor_*` JNI calls. Default queues: `high,default,low`.                                                                |
+| `resources/androidstudio/app/src/main/java/com/nativephp/mobile/bridge/LaravelEnvironment.kt` | App bootstrap: directory creation, OTA update, env vars, migrations, engine init.                                                                                                                       |
 
 ### iOS Native Layer
 
@@ -133,7 +134,7 @@ service. PHP runs via the Embed SAPI through JNI — there is no CLI binary.
 2. **No `fork()` in worker threads** — fork() in a multithreaded process deadlocks. The `common.php` bootstrap pre-sets `Terminal::$width`/`$height` via Reflection to prevent Symfony Console from calling `proc_open('stty')`.
 3. **No `setenv()`/`putenv()` from worker threads** — `common.php` uses `$_ENV`/`$_SERVER` assignment only (thread-local in ZTS). The C bridge blocks `setenv()` after engine init.
 4. **Static variables are per-thread in ZTS** — Guards like `static $done = false` do NOT prevent cross-thread races. Use `flock()` on lockfiles instead.
-5. **`RTLD_GLOBAL` via preloader** — Android's `System.loadLibrary()` uses `RTLD_LOCAL`. On API 36+, re-opening with `RTLD_GLOBAL` does NOT promote. The `php_preloader` library loads libphp.so with `RTLD_GLOBAL` _before_ `System.loadLibrary("php")` so opcache.so can resolve `execute_ex`. The build script also adds `DT_NEEDED: libphp.so` to opcache.so via patchelf as belt-and-suspenders.
+5. **`RTLD_GLOBAL` via compat preloader** — Android's `System.loadLibrary()` uses `RTLD_LOCAL`. On API 36+, re-opening with `RTLD_GLOBAL` does NOT promote. The `JNI_OnLoad` in `compat/android_compat.cpp` (compiled into `libcompat.so`) loads libphp.so with `RTLD_GLOBAL` _before_ `System.loadLibrary("php")` so opcache.so can resolve `execute_ex`. The build script also adds `DT_NEEDED: libphp.so` to opcache.so via patchelf as belt-and-suspenders. The former `php_preloader.c` approach was abandoned (file removed) because the separate library wasn't packaged into the APK.
 
 ---
 
@@ -280,22 +281,23 @@ seconds, capped at 5 minutes. A single successful job resets the counter.
 
 OPcache symbol resolution uses a two-layer approach:
 
-**Layer 1 — php_preloader (primary, Kotlin load order)**:
+**Layer 1 — `compat/android_compat.cpp` JNI_OnLoad (primary, Kotlin load order)**:
 
-1. `System.loadLibrary("php_preloader")` — JNI_OnLoad does `dlopen(libphp.so, RTLD_NOW | RTLD_GLOBAL)` before anything else loads it
+1. `System.loadLibrary("compat")` — `JNI_OnLoad` runs and calls `dlopen(libphp.so, RTLD_NOW | RTLD_GLOBAL)` before anything else loads it
 2. `System.loadLibrary("php")` — Bionic finds already-loaded libphp.so, preserves RTLD_GLOBAL flag
-3. Later, `dlopen(opcache.so)` in php_engine.c resolves all 426 undefined symbols from global scope
+3. Later, `dlopen(opcache.so)` in `php_engine_init()` resolves all 426 undefined symbols from global scope
 
 **Layer 2 — patchelf DT_NEEDED (belt-and-suspenders, build-time)**:
 
 - The build script adds `DT_NEEDED: libphp.so` to opcache.so via patchelf
 - Bionic resolves opcache.so's symbols via direct dependency linkage, regardless of RTLD_GLOBAL
 
-**Layer 3 — php_engine.c fallback (legacy, for older API levels)**:
+**Layer 3 — `php_engine_init()` dlopen fallback (legacy, for older API levels)**:
 
-- `dlopen(libphp.so, RTLD_NOW | RTLD_GLOBAL)` attempt — works on pre-API 36 Bionic
+- `dlopen(libphp.so, RTLD_NOW | RTLD_GLOBAL)` attempt in `php_engine_init()` — works on pre-API 36 Bionic
+- (`php_engine.c` is referenced in `CMakeLists.txt`; implementation not yet committed)
 
-**Post-load steps** (in php_engine.c):
+**Post-load steps** (in `php_engine_init()`):
 
 1. `dlopen(opcache.so, RTLD_NOW | RTLD_GLOBAL)` — loads OPcache before `php_embed_init()`
 2. INI: `zend_extension=<path>/opcache.so`, `opcache.enable=1`, `opcache.enable_cli=1`
