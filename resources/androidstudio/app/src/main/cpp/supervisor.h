@@ -195,6 +195,17 @@ extern "C"
     char *supervisor_queue_status_json(void);
 
     /**
+     * Native DB pool helpers used by PHP bridge functions.
+     * These APIs are safe to call even when SQLite modules are disabled;
+     * in that case they return no-pool defaults.
+     */
+    int supervisor_native_db_pool_has_pool(void);
+    void *supervisor_native_db_pool_acquire(uint32_t timeout_ms);
+    int supervisor_native_db_pool_release(void *handle);
+    int supervisor_native_db_pool_total(void);
+    int supervisor_native_db_pool_available(void);
+
+    /**
      * Shutdown the PHP engine.
      * Call after supervisor_stop and once all jobs are done.
      */

@@ -221,6 +221,8 @@ class WorkerServiceProvider extends ServiceProvider
                     $this->ensureQueueTablesExist();
                     WorkerErrorReporter::ensureTableExists();
                     $this->ensureConfigCached();
+                    NativeDbPool::instance()->warmUp();
+                    $this->warmHotPaths();
                 } finally {
                     flock($fp, LOCK_UN);
                 }
@@ -263,6 +265,7 @@ class WorkerServiceProvider extends ServiceProvider
                 )
             ');
             $db->statement('CREATE INDEX IF NOT EXISTS jobs_queue_index ON jobs (queue)');
+            $db->statement('CREATE INDEX IF NOT EXISTS jobs_queue_reserved_available_index ON jobs (queue, reserved_at, available_at)');
 
             $db->statement('
                 CREATE TABLE IF NOT EXISTS failed_jobs (
@@ -395,6 +398,30 @@ class WorkerServiceProvider extends ServiceProvider
             }
         } catch (\Throwable $e) {
             // Non-fatal — workers continue with file-based config loading
+        }
+    }
+
+    /**
+     * Prime OPcache for frequently touched worker/bootstrap files.
+     */
+    protected function warmHotPaths(): void
+    {
+        if (! function_exists('opcache_compile_file')) {
+            return;
+        }
+
+        $hotFiles = [
+            base_path('vendor/autoload.php'),
+            base_path('bootstrap/app.php'),
+            base_path('routes/console.php'),
+            base_path('vendor/nativephp/mobile/bootstrap/worker/queue_worker.php'),
+            base_path('vendor/nativephp/mobile/bootstrap/worker/scheduler_tick.php'),
+        ];
+
+        foreach ($hotFiles as $file) {
+            if (is_file($file)) {
+                @opcache_compile_file($file);
+            }
         }
     }
 

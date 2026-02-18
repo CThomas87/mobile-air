@@ -34,9 +34,9 @@ class WorkerMetrics
      */
     public static function snapshot(): array
     {
-        // Try native bridge first (available when running inside the native wrapper)
+        // Fall back to direct native supervisor function.
         if (function_exists('nativephp_supervisor_status')) {
-            $json = nativephp_supervisor_status();
+            $json = call_user_func('nativephp_supervisor_status');
             $data = json_decode($json, true);
             if (is_array($data)) {
                 return $data;
@@ -58,7 +58,7 @@ class WorkerMetrics
     public static function queueStatus(): ?array
     {
         if (function_exists('nativephp_queue_status')) {
-            $json = nativephp_queue_status();
+            $json = call_user_func('nativephp_queue_status');
             $data = json_decode($json, true);
             if (is_array($data)) {
                 return $data;
@@ -137,6 +137,18 @@ class WorkerMetrics
         $queue = self::queueStatus();
         $errors = self::recentErrors(10);
         $dbPool = NativeDbPool::instance()->stats();
+
+        $sqlitePool = is_array($supervisor['sqlitePool'] ?? null) ? $supervisor['sqlitePool'] : [];
+        $sqliteTotal = (int) ($sqlitePool['total'] ?? 0);
+        $sqliteAvailable = (int) ($sqlitePool['available'] ?? 0);
+        $dbPoolHasNative = (bool) ($dbPool['has_native'] ?? false);
+
+        if (! $dbPoolHasNative && $sqliteTotal > 0) {
+            $dbPool['has_native'] = true;
+            $dbPool['total'] = $sqliteTotal;
+            $dbPool['available'] = $sqliteAvailable;
+            $dbPool['in_use'] = max(0, $sqliteTotal - $sqliteAvailable);
+        }
 
         return [
             'supervisor' => $supervisor,

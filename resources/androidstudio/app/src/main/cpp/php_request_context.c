@@ -50,20 +50,6 @@ static __thread void (*tls_prev_interrupt_function)(zend_execute_data *) = NULL;
     } while (0)
 #endif
 
-/* DEBUG_REMOVE_AFTER_INVESTIGATION: temporary probe for workers HTTP output chunks. */
-#define DEBUG_HTTP_WRITE_PROBE_MAX_CHUNKS 3
-#define DEBUG_HTTP_WRITE_PREVIEW_BYTES 160
-
-static int is_workers_probe_uri(const char *uri)
-{
-    if (!uri)
-    {
-        return 0;
-    }
-
-    return strstr(uri, "/workers/status") != NULL || strstr(uri, "/workers/activities") != NULL;
-}
-
 /* ─── Output buffer constants ─── */
 #define OUTPUT_CHUNK_SIZE (64 * 1024)     /* 64KB increments */
 #define OUTPUT_MAX_SIZE (8 * 1024 * 1024) /* 8MB max per job */
@@ -166,43 +152,7 @@ struct php_request_context
     char *query_string;   /* e.g. "foo=bar" (NULL if none) */
     char *headers_raw;    /* "KEY\nVALUE\nKEY\nVALUE\n..." for $_SERVER injection */
 
-    int debug_http_write_probe_count; /* DEBUG_REMOVE_AFTER_INVESTIGATION */
 };
-
-static void log_workers_http_write_chunk(struct php_request_context *ctx, const char *str, size_t str_length)
-{
-    if (!ctx || !str || str_length == 0)
-    {
-        return;
-    }
-
-    if (ctx->job_type != JOB_TYPE_HTTP || !is_workers_probe_uri(ctx->request_uri))
-    {
-        return;
-    }
-
-    if (ctx->debug_http_write_probe_count >= DEBUG_HTTP_WRITE_PROBE_MAX_CHUNKS)
-    {
-        return;
-    }
-
-    char preview[DEBUG_HTTP_WRITE_PREVIEW_BYTES + 1];
-    size_t preview_length = str_length < DEBUG_HTTP_WRITE_PREVIEW_BYTES ? str_length : DEBUG_HTTP_WRITE_PREVIEW_BYTES;
-    for (size_t index = 0; index < preview_length; index++)
-    {
-        unsigned char ch = (unsigned char)str[index];
-        preview[index] = (ch >= 32 && ch <= 126) ? (char)ch : '.';
-    }
-    preview[preview_length] = '\0';
-
-    RC_LOGI("[WRITE-PROBE] uri=%s chunk_index=%d chunk_len=%zu preview=%s",
-            ctx->request_uri ? ctx->request_uri : "(null)",
-            ctx->debug_http_write_probe_count,
-            str_length,
-            preview);
-
-    ctx->debug_http_write_probe_count++;
-}
 
 static void capture_http_output_buffer_fallback(struct php_request_context *ctx)
 {
@@ -237,13 +187,6 @@ static void capture_http_output_buffer_fallback(struct php_request_context *ctx)
 
             buf_append(&ctx->stdout_buf, buffer_data, buffer_len);
 
-            if (is_workers_probe_uri(ctx->request_uri))
-            {
-                RC_LOGI("[BUFFER-FALLBACK] uri=%s replaced_stdout_len=%zu fallback_len=%zu",
-                        ctx->request_uri ? ctx->request_uri : "(null)",
-                        ctx->stdout_buf.length,
-                        buffer_len);
-            }
         }
     }
 
@@ -361,8 +304,6 @@ php_request_context_t *php_request_create(const char *job_id,
     ctx->request_uri = NULL;
     ctx->query_string = NULL;
     ctx->headers_raw = NULL;
-    ctx->debug_http_write_probe_count = 0;
-
     return ctx;
 }
 
@@ -963,7 +904,6 @@ size_t php_request_ub_write(const char *str, size_t str_length)
     php_request_context_t *ctx = tls_current_ctx;
     if (ctx)
     {
-        log_workers_http_write_chunk(ctx, str, str_length);
         buf_append(&ctx->stdout_buf, str, str_length);
     }
     /* If no context, output is silently dropped (engine init phase) */

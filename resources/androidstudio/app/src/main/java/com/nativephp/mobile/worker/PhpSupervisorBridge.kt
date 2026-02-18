@@ -126,6 +126,18 @@ object PhpSupervisorBridge {
     @JvmStatic
     external fun nativeWakeWorkers()
 
+    /**
+     * Set native SQLite database path and pool size for queue peek + pooling.
+     */
+    @JvmStatic
+    external fun nativeSetDbPath(dbPath: String, poolSize: Int)
+
+    /**
+     * Get native queue status JSON, e.g. {"total":N,"queues":{...}}.
+     */
+    @JvmStatic
+    external fun nativeGetQueueStatus(): String
+
     init {
         // Native libraries are already loaded by PHPBridge companion init.
         // If this runs before PHPBridge, ensure libs are loaded:

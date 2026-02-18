@@ -95,6 +95,60 @@ typedef struct
     int worker_id;
 } worker_thread_arg_t;
 
+static inline void add_milliseconds_to_timespec(struct timespec *ts, long milliseconds)
+{
+    if (!ts || milliseconds <= 0)
+    {
+        return;
+    }
+
+    ts->tv_sec += milliseconds / 1000;
+    ts->tv_nsec += (milliseconds % 1000) * 1000000L;
+
+    if (ts->tv_nsec >= 1000000000L)
+    {
+        ts->tv_sec += 1;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+static inline void set_active_job(worker_pool_t *pool, int worker_id, php_request_context_t *ctx)
+{
+    pthread_mutex_lock(&pool->active_mutex);
+    if (worker_id >= 0 && worker_id < pool->num_workers)
+    {
+        pool->active_jobs[worker_id] = ctx;
+    }
+
+    if (ctx)
+    {
+        atomic_fetch_add(&pool->active_count, 1);
+    }
+    else
+    {
+        atomic_fetch_sub(&pool->active_count, 1);
+    }
+    pthread_mutex_unlock(&pool->active_mutex);
+}
+
+static inline void push_completed_job(worker_pool_t *pool, php_request_context_t *ctx)
+{
+    completed_entry_t *entry = (completed_entry_t *)malloc(sizeof(completed_entry_t));
+    if (!entry)
+    {
+        return;
+    }
+
+    entry->ctx = ctx;
+    entry->next = NULL;
+
+    pthread_mutex_lock(&pool->completed_mutex);
+    entry->next = pool->completed_head;
+    pool->completed_head = entry;
+    pthread_cond_broadcast(&pool->completed_cond);
+    pthread_mutex_unlock(&pool->completed_mutex);
+}
+
 /* ─── Worker thread function ─── */
 static void *worker_thread_func(void *arg)
 {
@@ -121,13 +175,7 @@ static void *worker_thread_func(void *arg)
         pthread_mutex_lock(&pool->queue_mutex);
         struct timespec stagger_ts;
         clock_gettime(CLOCK_REALTIME, &stagger_ts);
-        stagger_ts.tv_sec += stagger_us / 1000000;
-        stagger_ts.tv_nsec += (stagger_us % 1000000) * 1000;
-        if (stagger_ts.tv_nsec >= 1000000000)
-        {
-            stagger_ts.tv_sec += 1;
-            stagger_ts.tv_nsec -= 1000000000;
-        }
+        add_milliseconds_to_timespec(&stagger_ts, (long)(stagger_us / 1000));
         pthread_cond_timedwait(&pool->queue_cond, &pool->queue_mutex, &stagger_ts);
         pthread_mutex_unlock(&pool->queue_mutex);
 
@@ -159,12 +207,7 @@ static void *worker_thread_func(void *arg)
             pthread_mutex_lock(&pool->queue_mutex);
             struct timespec ui_ts;
             clock_gettime(CLOCK_REALTIME, &ui_ts);
-            ui_ts.tv_nsec += 25 * 1000000; /* 25ms */
-            if (ui_ts.tv_nsec >= 1000000000)
-            {
-                ui_ts.tv_sec += 1;
-                ui_ts.tv_nsec -= 1000000000;
-            }
+            add_milliseconds_to_timespec(&ui_ts, 25);
             pthread_cond_timedwait(&pool->queue_cond, &pool->queue_mutex, &ui_ts);
             pthread_mutex_unlock(&pool->queue_mutex);
             continue;
@@ -206,13 +249,7 @@ static void *worker_thread_func(void *arg)
             continue;
 
         /* Track as active */
-        pthread_mutex_lock(&pool->active_mutex);
-        if (worker_id >= 0 && worker_id < pool->num_workers)
-        {
-            pool->active_jobs[worker_id] = ctx;
-        }
-        atomic_fetch_add(&pool->active_count, 1);
-        pthread_mutex_unlock(&pool->active_mutex);
+        set_active_job(pool, worker_id, ctx);
 
         /* Execute the job */
         WP_LOGI("Worker %d: Executing job %s", worker_id, php_request_get_job_id(ctx));
@@ -267,27 +304,10 @@ static void *worker_thread_func(void *arg)
                 php_request_get_job_id(ctx), job_status);
 
         /* Remove from active */
-        pthread_mutex_lock(&pool->active_mutex);
-        if (worker_id >= 0 && worker_id < pool->num_workers)
-        {
-            pool->active_jobs[worker_id] = NULL;
-        }
-        atomic_fetch_sub(&pool->active_count, 1);
-        pthread_mutex_unlock(&pool->active_mutex);
+        set_active_job(pool, worker_id, NULL);
 
         /* Move to completed list (for await) */
-        completed_entry_t *entry = (completed_entry_t *)malloc(sizeof(completed_entry_t));
-        if (entry)
-        {
-            entry->ctx = ctx;
-            entry->next = NULL;
-
-            pthread_mutex_lock(&pool->completed_mutex);
-            entry->next = pool->completed_head;
-            pool->completed_head = entry;
-            pthread_cond_broadcast(&pool->completed_cond);
-            pthread_mutex_unlock(&pool->completed_mutex);
-        }
+        push_completed_job(pool, ctx);
     }
 
     /* Detach from TSRM */
@@ -581,17 +601,7 @@ int worker_pool_cancel(worker_pool_t *pool, const char *job_id)
             php_request_cancel(node->ctx);
 
             /* Move to completed */
-            completed_entry_t *entry = (completed_entry_t *)malloc(sizeof(completed_entry_t));
-            if (entry)
-            {
-                entry->ctx = node->ctx;
-                entry->next = NULL;
-                pthread_mutex_lock(&pool->completed_mutex);
-                entry->next = pool->completed_head;
-                pool->completed_head = entry;
-                pthread_cond_broadcast(&pool->completed_cond);
-                pthread_mutex_unlock(&pool->completed_mutex);
-            }
+            push_completed_job(pool, node->ctx);
 
             free(node);
             pthread_mutex_unlock(&pool->queue_mutex);

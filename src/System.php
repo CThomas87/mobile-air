@@ -17,10 +17,25 @@ class System
     public static function isWorkerContext(): bool
     {
         // Prefer $_SERVER (per-thread in ZTS, immune to setenv race)
-        // Fall back to getenv() for non-engine contexts
-        $jobType = $_SERVER['NATIVEPHP_JOB_TYPE'] ?? getenv('NATIVEPHP_JOB_TYPE');
+        // and avoid getenv() for HTTP requests, since worker threads may
+        // temporarily set process-wide env vars.
+        $serverJobType = $_SERVER['NATIVEPHP_JOB_TYPE'] ?? null;
+        if (in_array($serverJobType, ['queue', 'scheduler'], true)) {
+            return true;
+        }
 
-        return in_array($jobType, ['queue', 'scheduler'], true);
+        if ($serverJobType !== null) {
+            return false;
+        }
+
+        // getenv() fallback is only safe for CLI/non-request execution.
+        if (PHP_SAPI === 'cli' || PHP_SAPI === 'phpdbg') {
+            $envJobType = getenv('NATIVEPHP_JOB_TYPE') ?: null;
+
+            return in_array($envJobType, ['queue', 'scheduler'], true);
+        }
+
+        return false;
     }
 
     /**

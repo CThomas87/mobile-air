@@ -68,7 +68,7 @@ class MainActivity : FragmentActivity(), WebViewProvider {
     private var showSplash by mutableStateOf(true)
 
     // Status bar style configuration - replaced during build
-    private val statusBarStyle = "REPLACE_STATUS_BAR_STYLE"
+    private val statusBarStyle = "auto"
 
     companion object {
         // Static instance holder for accessing MainActivity from other activities
@@ -147,6 +147,10 @@ class MainActivity : FragmentActivity(), WebViewProvider {
             val fullUrl = "http://127.0.0.1$target"
             Log.d("DeepLink", "🚀 Loading final URL after WebView setup: $fullUrl")
             webView.loadUrl(fullUrl)
+
+            Handler(Looper.getMainLooper()).postDelayed({
+                ensureWorkerServiceRunning("post_load_fallback")
+            }, 1500)
 
             pendingDeepLink = null
 
@@ -449,8 +453,16 @@ class MainActivity : FragmentActivity(), WebViewProvider {
             return
         }
 
+        ensureWorkerServiceRunning("first_page")
+    }
+
+    fun ensureWorkerServiceRunning(reason: String) {
+        if (workerAutoStarted) {
+            return
+        }
+
         workerAutoStarted = true
-        Log.i("WorkerAutoStart", "🖼️ First page rendered ($safeUrl), starting worker service")
+        Log.i("WorkerAutoStart", "🖼️ Worker start trigger ($reason), starting worker service")
         autoStartWorkerService()
     }
 

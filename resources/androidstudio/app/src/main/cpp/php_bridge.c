@@ -15,6 +15,12 @@
 #define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__))
 #define LOGE(...) ((void)__android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__))
 
+#if defined(NATIVEPHP_ENABLE_TIMING_TELEMETRY) && NATIVEPHP_ENABLE_TIMING_TELEMETRY
+#define TIMING_LOG(...) LOGI(__VA_ARGS__)
+#else
+#define TIMING_LOG(...) ((void)0)
+#endif
+
 JavaVM *g_jvm = NULL;
 jobject g_bridge_instance = NULL;
 
@@ -33,6 +39,61 @@ static char *g_collected_output = NULL;
 static size_t g_collected_length = 0;
 static size_t g_collected_capacity = 0;
 static int g_output_limit_hit = 0;
+
+#define DB_POOL_MAX_TOKENS 64
+static pthread_mutex_t g_db_pool_token_mutex = PTHREAD_MUTEX_INITIALIZER;
+static void *g_db_pool_tokens[DB_POOL_MAX_TOKENS] = {0};
+
+static int db_pool_store_handle(void *handle)
+{
+    if (!handle)
+    {
+        return 0;
+    }
+
+    pthread_mutex_lock(&g_db_pool_token_mutex);
+    int token = 0;
+    for (int i = 0; i < DB_POOL_MAX_TOKENS; i++)
+    {
+        if (g_db_pool_tokens[i] == NULL)
+        {
+            g_db_pool_tokens[i] = handle;
+            token = i + 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_db_pool_token_mutex);
+    return token;
+}
+
+static void *db_pool_take_handle(int token)
+{
+    if (token <= 0 || token > DB_POOL_MAX_TOKENS)
+    {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&g_db_pool_token_mutex);
+    void *handle = g_db_pool_tokens[token - 1];
+    g_db_pool_tokens[token - 1] = NULL;
+    pthread_mutex_unlock(&g_db_pool_token_mutex);
+    return handle;
+}
+
+static int db_pool_checked_out_count(void)
+{
+    pthread_mutex_lock(&g_db_pool_token_mutex);
+    int count = 0;
+    for (int i = 0; i < DB_POOL_MAX_TOKENS; i++)
+    {
+        if (g_db_pool_tokens[i] != NULL)
+        {
+            count++;
+        }
+    }
+    pthread_mutex_unlock(&g_db_pool_token_mutex);
+    return count;
+}
 
 void pipe_php_output(const char *str);
 
@@ -89,61 +150,6 @@ static void log_output_signature(const char *data, size_t len, const char *uri)
     }
 }
 
-static int is_worker_probe_uri(const char *uri)
-{
-    if (!uri)
-    {
-        return 0;
-    }
-
-    return strstr(uri, "/workers/status") != NULL || strstr(uri, "/workers/activities") != NULL;
-}
-
-static void log_transport_body_presence(const char *uri, const char *output)
-{
-    if (!is_worker_probe_uri(uri))
-    {
-        return;
-    }
-
-    if (!output)
-    {
-        LOGI("⏱️ [TRANSPORT] uri=%s raw_len=0 has_body=no body_len=0 separator=none",
-             uri ? uri : "(null)");
-        return;
-    }
-
-    size_t raw_len = strlen(output);
-    const char *body = NULL;
-    const char *separator = "none";
-
-    const char *http_split = strstr(output, "\r\n\r\n");
-    if (http_split)
-    {
-        body = http_split + 4;
-        separator = "crlf";
-    }
-    else
-    {
-        const char *lf_split = strstr(output, "\n\n");
-        if (lf_split)
-        {
-            body = lf_split + 2;
-            separator = "lf";
-        }
-    }
-
-    size_t body_len = body ? strlen(body) : 0;
-    const char *has_body = body_len > 0 ? "yes" : "no";
-
-    LOGI("⏱️ [TRANSPORT] uri=%s raw_len=%zu has_body=%s body_len=%zu separator=%s",
-         uri ? uri : "(null)",
-         raw_len,
-         has_body,
-         body_len,
-         separator);
-}
-
 static void capture_legacy_output_buffer(const char *uri)
 {
     zval output_buffer;
@@ -154,15 +160,15 @@ static void capture_legacy_output_buffer(const char *uri)
         Z_STRLEN(output_buffer) > 0)
     {
         size_t buffer_len = (size_t)Z_STRLEN(output_buffer);
-        LOGI("⏱️ [TIMING] LEGACY MODE: php_output_get_contents captured %zu bytes uri=%s",
-             buffer_len,
-             uri ? uri : "(null)");
+           TIMING_LOG("⏱️ [TIMING] LEGACY MODE: php_output_get_contents captured %zu bytes uri=%s",
+                    buffer_len,
+                    uri ? uri : "(null)");
         pipe_php_output(Z_STRVAL(output_buffer));
     }
     else
     {
-        LOGI("⏱️ [TIMING] LEGACY MODE: php_output_get_contents empty uri=%s",
-             uri ? uri : "(null)");
+           TIMING_LOG("⏱️ [TIMING] LEGACY MODE: php_output_get_contents empty uri=%s",
+                    uri ? uri : "(null)");
     }
 
     zval_ptr_dtor(&output_buffer);
@@ -390,11 +396,155 @@ PHP_FUNCTION(nativephp_can)
     RETURN_BOOL(NativePHPCan(function_name));
 }
 
+/* int|false nativephp_db_pool_acquire(int $timeout_ms = 5000) */
+PHP_FUNCTION(nativephp_db_pool_acquire)
+{
+    zend_long timeout_ms = 5000;
+
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_LONG(timeout_ms)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (timeout_ms < 0)
+    {
+        timeout_ms = 0;
+    }
+    if (timeout_ms > 60000)
+    {
+        timeout_ms = 60000;
+    }
+
+    if (!supervisor_native_db_pool_has_pool())
+    {
+        LOGI("[DB-POOL] nativephp_db_pool_acquire unavailable (pool not initialized)");
+        RETURN_FALSE;
+    }
+
+    void *handle = supervisor_native_db_pool_acquire((uint32_t)timeout_ms);
+    if (!handle)
+    {
+        LOGI("[DB-POOL] nativephp_db_pool_acquire timeout timeout_ms=%ld", (long)timeout_ms);
+        RETURN_FALSE;
+    }
+
+    int token = db_pool_store_handle(handle);
+    if (token <= 0)
+    {
+        supervisor_native_db_pool_release(handle);
+        LOGE("[DB-POOL] nativephp_db_pool_acquire failed: token capacity reached");
+        RETURN_FALSE;
+    }
+
+    LOGI("[DB-POOL] nativephp_db_pool_acquire success token=%d timeout_ms=%ld", token, (long)timeout_ms);
+    RETURN_LONG(token);
+}
+
+/* bool nativephp_db_pool_release(int $token) */
+PHP_FUNCTION(nativephp_db_pool_release)
+{
+    zend_long token = 0;
+
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+    Z_PARAM_LONG(token)
+    ZEND_PARSE_PARAMETERS_END();
+
+    void *handle = db_pool_take_handle((int)token);
+    if (!handle)
+    {
+        LOGI("[DB-POOL] nativephp_db_pool_release ignored token=%ld (no handle)", (long)token);
+        RETURN_FALSE;
+    }
+
+    int released = supervisor_native_db_pool_release(handle);
+    LOGI("[DB-POOL] nativephp_db_pool_release token=%ld released=%d", (long)token, released);
+    RETURN_BOOL(released);
+}
+
+/* array nativephp_db_pool_stats() */
+PHP_FUNCTION(nativephp_db_pool_stats)
+{
+    if (zend_parse_parameters_none() == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    int has_pool = supervisor_native_db_pool_has_pool();
+    int total = supervisor_native_db_pool_total();
+    int available = supervisor_native_db_pool_available();
+    int checked_out = db_pool_checked_out_count();
+
+    array_init(return_value);
+    add_assoc_bool(return_value, "has_native_pool", has_pool ? 1 : 0);
+    add_assoc_long(return_value, "total", total);
+    add_assoc_long(return_value, "available", available);
+    add_assoc_long(return_value, "in_use", (total - available) >= 0 ? (total - available) : 0);
+    add_assoc_long(return_value, "checked_out_tokens", checked_out);
+}
+
+/* string|false nativephp_supervisor_status() */
+PHP_FUNCTION(nativephp_supervisor_status)
+{
+    if (zend_parse_parameters_none() == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    char *status = supervisor_status_json();
+    if (!status)
+    {
+        RETURN_FALSE;
+    }
+
+    RETVAL_STRING(status);
+    free(status);
+}
+
+/* string|false nativephp_queue_status() */
+PHP_FUNCTION(nativephp_queue_status)
+{
+    if (zend_parse_parameters_none() == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    char *status = supervisor_queue_status_json();
+    if (!status)
+    {
+        RETURN_FALSE;
+    }
+
+    RETVAL_STRING(status);
+    free(status);
+}
+
 /* Function entry table — set as php_embed_module.additional_functions */
 const zend_function_entry nativephp_bridge_functions[] = {
     PHP_FE(nativephp_call, NULL)
         PHP_FE(nativephp_can, NULL)
-            PHP_FE_END};
+            PHP_FE(nativephp_db_pool_acquire, NULL)
+                PHP_FE(nativephp_db_pool_release, NULL)
+                    PHP_FE(nativephp_db_pool_stats, NULL)
+                        PHP_FE(nativephp_supervisor_status, NULL)
+                            PHP_FE(nativephp_queue_status, NULL)
+                        PHP_FE_END};
+
+static void ensure_native_bridge_functions_registered(void)
+{
+    if (zend_hash_str_exists(CG(function_table), "nativephp_call", sizeof("nativephp_call") - 1))
+    {
+        return;
+    }
+
+    if (zend_register_functions(NULL, nativephp_bridge_functions, NULL, MODULE_PERSISTENT) == SUCCESS)
+    {
+        LOGI("[DB-POOL] Registered nativephp bridge functions at runtime");
+    }
+    else
+    {
+        LOGE("[DB-POOL] Failed to register nativephp bridge functions at runtime");
+    }
+}
 
 char *run_php_script_once(const char *scriptPath, const char *method, const char *uri, const char *postData, const char *headers)
 {
@@ -419,7 +569,7 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
     {
         static pthread_mutex_t g_engine_http_request_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-        LOGI("⏱️ [TIMING] run_php_script_once ENGINE MODE: START uri=%s", safe_uri);
+        TIMING_LOG("⏱️ [TIMING] run_php_script_once ENGINE MODE: START uri=%s", safe_uri);
         /* ENGINE MODE: Do NOT touch g_collected_output — it's shared
          * across threads and would race.  TLS-routed output is used instead. */
 
@@ -456,13 +606,13 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
 
         php_request_set_http_info(ctx, safe_method, safe_uri, query_string, headers);
 
-        LOGI("⏱️ [TIMING] ENGINE MODE: before php_request_execute uri=%s", safe_uri);
+        TIMING_LOG("⏱️ [TIMING] ENGINE MODE: before php_request_execute uri=%s", safe_uri);
         int exec_rc = php_request_execute(ctx);
-        LOGI("⏱️ [TIMING] ENGINE MODE: after php_request_execute uri=%s rc=%d status=%d exit=%d",
-             safe_uri,
-             exec_rc,
-             (int)php_request_get_status(ctx),
-             php_request_get_exit_code(ctx));
+        TIMING_LOG("⏱️ [TIMING] ENGINE MODE: after php_request_execute uri=%s rc=%d status=%d exit=%d",
+               safe_uri,
+               exec_rc,
+               (int)php_request_get_status(ctx),
+               php_request_get_exit_code(ctx));
 
         /* Collect output after shutdown flushes buffering layers.
          * ENGINE MODE uses only TLS-routed output — do NOT read the
@@ -516,15 +666,15 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
             }
         }
 
-        LOGI("⏱️ [TIMING] ENGINE MODE: output_len=%zu stderr_len=%zu error_len=%zu final_len=%zu uri=%s",
-             output_len, stderr_len, error_len, final_len, safe_uri);
+        TIMING_LOG("⏱️ [TIMING] ENGINE MODE: output_len=%zu stderr_len=%zu error_len=%zu final_len=%zu uri=%s",
+                   output_len, stderr_len, error_len, final_len, safe_uri);
         if (final_len > 0)
         {
             char preview[201];
             size_t plen = final_len < 200 ? final_len : 200;
             memcpy(preview, final_output, plen);
             preview[plen] = '\0';
-            LOGI("⏱️ [TIMING] ENGINE MODE: output_preview=%.200s", preview);
+            TIMING_LOG("⏱️ [TIMING] ENGINE MODE: output_preview=%.200s", preview);
         }
         else
         {
@@ -535,7 +685,7 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
         php_request_destroy(ctx);
         pthread_mutex_unlock(&g_engine_http_request_mutex);
 
-        LOGI("⏱️ [TIMING] run_php_script_once ENGINE MODE: END uri=%s", safe_uri);
+        TIMING_LOG("⏱️ [TIMING] run_php_script_once ENGINE MODE: END uri=%s", safe_uri);
         return response;
     }
 
@@ -572,13 +722,13 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
     // ✅ Register nativephp_call / nativephp_can as PHP functions
     php_embed_module.additional_functions = nativephp_bridge_functions;
 
-    LOGI("⏱️ [TIMING] LEGACY MODE: before php_embed_init uri=%s", safe_uri);
+    TIMING_LOG("⏱️ [TIMING] LEGACY MODE: before php_embed_init uri=%s", safe_uri);
     // ✅ Start PHP
     if (php_embed_init(0, NULL) != SUCCESS)
     {
         return strdup("HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nPHP init failed.");
     }
-    LOGI("⏱️ [TIMING] LEGACY MODE: after php_embed_init uri=%s", safe_uri);
+    TIMING_LOG("⏱️ [TIMING] LEGACY MODE: after php_embed_init uri=%s", safe_uri);
     sapi_module.header_handler = android_header_handler;
     php_initialized = 1;
 
@@ -627,11 +777,11 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
         }
 
         // ✅ Execute the PHP script
-        LOGI("⏱️ [TIMING] LEGACY MODE: before php_execute_script uri=%s script=%s", safe_uri, safe_script_path);
+        TIMING_LOG("⏱️ [TIMING] LEGACY MODE: before php_execute_script uri=%s script=%s", safe_uri, safe_script_path);
         zend_file_handle fileHandle;
         zend_stream_init_filename(&fileHandle, safe_script_path);
         php_execute_script(&fileHandle);
-        LOGI("⏱️ [TIMING] LEGACY MODE: after php_execute_script uri=%s", safe_uri);
+        TIMING_LOG("⏱️ [TIMING] LEGACY MODE: after php_execute_script uri=%s", safe_uri);
 
         /* Fallback capture path: pull active output buffer before
          * php_embed_shutdown() to avoid losing body content when
@@ -644,11 +794,11 @@ char *run_php_script_once(const char *scriptPath, const char *method, const char
 
     php_embed_shutdown();
     php_initialized = 0;
-    LOGI("⏱️ [TIMING] LEGACY MODE: after php_embed_shutdown uri=%s", safe_uri);
+    TIMING_LOG("⏱️ [TIMING] LEGACY MODE: after php_embed_shutdown uri=%s", safe_uri);
 
     // ✅ Copy output after shutdown so shutdown-time buffer flush is captured
     size_t response_len = (g_collected_output != NULL) ? strlen(g_collected_output) : 0;
-    LOGI("⏱️ [TIMING] LEGACY MODE: response_len=%zu uri=%s", response_len, safe_uri);
+    TIMING_LOG("⏱️ [TIMING] LEGACY MODE: response_len=%zu uri=%s", response_len, safe_uri);
 
     if (response_len == 0)
     {
@@ -860,7 +1010,7 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
         SG(request_info).argc = artisan_argc;
         SG(request_info).argv = artisan_argv;
 
-        LOGI("⏱️ [TIMING] artisan ENGINE MODE: before php_request_startup");
+        TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: before php_request_startup");
         if (php_request_startup() == FAILURE)
         {
             LOGE("❌ php_request_startup failed for artisan");
@@ -869,7 +1019,7 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
             result = (*env)->NewStringUTF(env, "php_request_startup failed");
             goto cleanup;
         }
-        LOGI("⏱️ [TIMING] artisan ENGINE MODE: after php_request_startup");
+        TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: after php_request_startup");
 
         /* Inject console-mode env vars into per-thread $_SERVER/$_ENV
          * (replaces the process-global setenv that was removed for thread safety) */
@@ -890,23 +1040,23 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
                 "if (!defined('STDERR')) define('STDERR', fopen('php://output', 'w'));",
                 NULL, "patch_stdio");
 
-            LOGI("⏱️ [TIMING] artisan ENGINE MODE: before php_execute_script cmd=%s", command);
+            TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: before php_execute_script cmd=%s", command);
             zend_file_handle file_handle;
             zend_stream_init_filename(&file_handle, artisanPath);
             php_execute_script(&file_handle);
-            LOGI("⏱️ [TIMING] artisan ENGINE MODE: after php_execute_script cmd=%s", command);
+            TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: after php_execute_script cmd=%s", command);
         }
         zend_end_try();
 
         /* Collect output */
         const char *output = php_request_get_stdout(ctx);
-        LOGI("⏱️ [TIMING] artisan ENGINE MODE: output_len=%zu cmd=%s",
-             output ? strlen(output) : 0, command);
+           TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: output_len=%zu cmd=%s",
+                    output ? strlen(output) : 0, command);
         result = (*env)->NewStringUTF(env, output ? output : "");
 
-        LOGI("⏱️ [TIMING] artisan ENGINE MODE: before php_request_shutdown cmd=%s", command);
+           TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: before php_request_shutdown cmd=%s", command);
         php_request_shutdown(NULL);
-        LOGI("⏱️ [TIMING] artisan ENGINE MODE: after php_request_shutdown cmd=%s", command);
+           TIMING_LOG("⏱️ [TIMING] artisan ENGINE MODE: after php_request_shutdown cmd=%s", command);
         php_request_set_current(NULL);
         php_request_destroy(ctx);
     }
@@ -916,12 +1066,12 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
          * LEGACY MODE: Use php_embed_init/shutdown per command.
          * Only ONE php_embed_init cycle per command (not two).
          * ═══════════════════════════════════════════════════════════ */
-        LOGI("⏱️ [TIMING] artisan LEGACY MODE: START cmd=%s", command);
+        TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: START cmd=%s", command);
 
         /* Ensure any leftover PHP is cleanly shut down first */
         if (php_initialized)
         {
-            LOGI("⏱️ [TIMING] artisan LEGACY MODE: shutting down stale PHP");
+            TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: shutting down stale PHP");
             php_embed_shutdown();
             php_initialized = 0;
         }
@@ -943,7 +1093,7 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
         php_embed_module.ini_entries = "display_errors=1\nlog_errors=1\nerror_reporting=E_ALL\nimplicit_flush=1\noutput_buffering=0\nregister_argc_argv=1\n";
         php_embed_module.additional_functions = nativephp_bridge_functions;
 
-        LOGI("⏱️ [TIMING] artisan LEGACY MODE: before php_embed_init cmd=%s", command);
+        TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: before php_embed_init cmd=%s", command);
         LOGI("🔍 [DIAG] artisan_argc=%d artisanPath=%s", artisan_argc, artisanPath);
         for (int i = 0; i < artisan_argc; i++)
         {
@@ -954,7 +1104,7 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
             php_initialized = 1;
             sapi_module.header_handler = php_embed_module.header_handler;
 
-            LOGI("⏱️ [TIMING] artisan LEGACY MODE: php_embed_init OK, executing cmd=%s", command);
+            TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: php_embed_init OK, executing cmd=%s", command);
 
             zend_eval_string(
                 "if (!defined('STDOUT')) define('STDOUT', fopen('php://output', 'w')); "
@@ -965,20 +1115,20 @@ JNIEXPORT jstring JNICALL native_run_artisan_command(JNIEnv *env, jobject thiz, 
             zend_stream_init_filename(&file_handle, artisanPath);
             php_execute_script(&file_handle);
 
-            LOGI("⏱️ [TIMING] artisan LEGACY MODE: php_execute_script DONE cmd=%s", command);
+            TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: php_execute_script DONE cmd=%s", command);
 
             php_embed_shutdown();
             php_initialized = 0;
 
-            LOGI("⏱️ [TIMING] artisan LEGACY MODE: php_embed_shutdown DONE cmd=%s", command);
+            TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: php_embed_shutdown DONE cmd=%s", command);
         }
         else
         {
             LOGE("❌ artisan LEGACY MODE: php_embed_init FAILED cmd=%s", command);
         }
 
-        LOGI("⏱️ [TIMING] artisan LEGACY MODE: END cmd=%s output_len=%zu",
-             command, g_collected_length);
+           TIMING_LOG("⏱️ [TIMING] artisan LEGACY MODE: END cmd=%s output_len=%zu",
+                    command, g_collected_length);
         result = (*env)->NewStringUTF(env, g_collected_output ? g_collected_output : "");
     }
 
@@ -1045,8 +1195,6 @@ JNIEXPORT jstring JNICALL native_handle_request_once(
          post ? strlen(post) : 0);
 
     char *output = run_php_script_once(path, method, uri, post, hdrs);
-
-    log_transport_body_presence(uri, output);
 
     LOGI("⏱️ [TIMING] JNI native_handle_request_once END uri=%s output_len=%zu",
          uri ? uri : "(null)",
@@ -1295,6 +1443,26 @@ JNIEXPORT void JNICALL native_supervisor_wake_workers(JNIEnv *env, jclass clazz)
     supervisor_wake_workers();
 }
 
+JNIEXPORT void JNICALL native_supervisor_set_db_path(JNIEnv *env, jclass clazz,
+                                                     jstring jDbPath, jint poolSize)
+{
+    const char *dbPath = (*env)->GetStringUTFChars(env, jDbPath, NULL);
+    supervisor_set_db_path((strlen(dbPath) > 0) ? dbPath : NULL, (int)poolSize);
+    (*env)->ReleaseStringUTFChars(env, jDbPath, dbPath);
+}
+
+JNIEXPORT jstring JNICALL native_supervisor_get_queue_status(JNIEnv *env, jclass clazz)
+{
+    char *status = supervisor_queue_status_json();
+    if (status)
+    {
+        jstring result = (*env)->NewStringUTF(env, status);
+        free(status);
+        return result;
+    }
+    return (*env)->NewStringUTF(env, "{\"total\":0,\"queues\":{}}");
+}
+
 /* ═══════════════════════════════════════════════════════════════ */
 
 static JNINativeMethod gMethods[] = {
@@ -1327,6 +1495,8 @@ static JNINativeMethod gSupervisorMethods[] = {
     {"nativeSetMemoryLimit", "(Ljava/lang/String;)V", (void *)native_supervisor_set_memory_limit},
     {"nativeSetLogFile", "(Ljava/lang/String;I)V", (void *)native_supervisor_set_log_file},
     {"nativeWakeWorkers", "()V", (void *)native_supervisor_wake_workers},
+    {"nativeSetDbPath", "(Ljava/lang/String;I)V", (void *)native_supervisor_set_db_path},
+    {"nativeGetQueueStatus", "()Ljava/lang/String;", (void *)native_supervisor_get_queue_status},
 };
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved)

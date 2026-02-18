@@ -231,21 +231,21 @@ compiled into `libphp_wrapper.so` via CMake.
 
 ### 4.1 Module Inventory
 
-| File                          | Lines | Purpose                                                                                                                                                                                                                                                                |
-| ----------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `php_engine.h`                | 89    | Process-wide PHP engine singleton interface. Declares `php_engine_init()`, `fix_opcache_tls_cache()`, `fix_opcache_per_thread_state()`. **Note: `.c` implementation is referenced in CMakeLists.txt but is not yet committed to the repo.**                            |
-| `php_thread_context.c` / `.h` | 129   | Per-thread TSRM attachment/detachment. `ts_resource(0)` + `TSRMLS_CACHE_UPDATE()`. Defines `TSRMLS_CACHE_DEFINE()` for its own translation unit to avoid emutls descriptor conflicts.                                                                                  |
-| `php_request_context.h`       | 182   | Per-job isolated execution context interface. Declares `php_request_create()`, `php_request_execute()`, job status/type enums, priority field. **Note: `.c` implementation is referenced in CMakeLists.txt but is not yet committed to the repo.**                     |
-| `worker_pool.c` / `.h`        | 740   | Native pthread pool (1–8 workers). Job queue (condvar-based), completion tracking, staggered starts, circuit breaker, UI-lane priority yielding, `worker_pool_wake()` for immediate dispatch.                                                                          |
-| `scheduler_gate.c` / `.h`     | 67    | Mutex ensuring `schedule:run` never overlaps. Uses atomic CAS; new ticks are rejected (not queued) while one is running.                                                                                                                                               |
-| `supervisor.c` / `.h`         | 733   | Top-level orchestrator. Owns engine + pool + gate lifecycle, job ID generation, structured JSON logging, circuit breaker config, memory limit config, `supervisor_status_json()`. Default memory limit: `256M`.                                                        |
-| `bridge_jni.cpp`              | 196   | JNI bridge for the `BridgeRouterKt` can/call API. Caches `nativePHPCan` and `nativePHPCall` method IDs at init; called by `libphp_wrapper.so` for native↔PHP capability routing.                                                                                       |
-| `libphp_wrapper.cpp`          | 121   | libphp.so dlopen wrapper. Re-opens `libphp.so` and `libcompat.so` via `RTLD_GLOBAL` in a C++ constructor. Also re-opens `libphp_wrapper.so` itself with `RTLD_GLOBAL` to export symbols to PHP extensions.                                                             |
-| `zts_guard.h`                 | 46    | `#error` if ZTS is not defined at compile time. `nativephp_verify_zts_runtime()` for belt-and-suspenders check.                                                                                                                                                        |
-| `sqlite_pool.c` / `.h`        | ~280  | Lightweight SQLite connection pool. Pre-opens N WAL connections; worker threads borrow/return via condvar. **Disabled by default** (`NATIVEPHP_ENABLE_SQLITE_MODULES=OFF`). Requires `sqlite3.h` in include path.                                                      |
-| `native_queue.c` / `.h`       | ~310  | Zero-PHP-overhead queue introspection. Queries `jobs` table directly via SQLite C API. **Disabled by default** (same CMake flag). When enabled, avoids PHP bootstrap for empty queues.                                                                                 |
-| `compat/android_compat.cpp`   | ~110  | Bionic compatibility shim (`getdtablesize()`, `copy_file_range()` polyfills) **plus RTLD_GLOBAL preloader** for libphp.so via `JNI_OnLoad`. Primary mechanism for OPcache symbol visibility. No glob/globfree polyfill (those are handled via `php_config.h` patches). |
-| `PHP.c` / `.h`                | —     | Legacy single-request PHP execution for UI process HTTP serving.                                                                                                                                                                                                       |
+| File                           | Lines      | Purpose                                                                                                                                                                                                                                                                |
+| ------------------------------ | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `php_engine.c` / `.h`          | 1188 / 89  | Process-wide PHP engine singleton. `php_engine_init()` with RTLD_GLOBAL probe, OPcache dlopen, `php_embed_init()`, warmup pass, TLS-routed output. `fix_opcache_tls_cache()`, `fix_opcache_per_thread_state()`.                                                        |
+| `php_thread_context.c` / `.h`  | 129        | Per-thread TSRM attachment/detachment. `ts_resource(0)` + `TSRMLS_CACHE_UPDATE()`. Defines `TSRMLS_CACHE_DEFINE()` for its own translation unit to avoid emutls descriptor conflicts.                                                                                  |
+| `php_request_context.c` / `.h` | 1038 / 182 | Per-job isolated execution context. `php_request_create()`, `php_request_execute()`, `php_request_destroy()`. Per-thread output buffers, cooperative cancellation via Zend VM interrupt, HTTP `$_SERVER` injection, job status/type enums, priority field.             |
+| `worker_pool.c` / `.h`         | 740        | Native pthread pool (1–8 workers). Job queue (condvar-based), completion tracking, staggered starts, circuit breaker, UI-lane priority yielding, `worker_pool_wake()` for immediate dispatch.                                                                          |
+| `scheduler_gate.c` / `.h`      | 67         | Mutex ensuring `schedule:run` never overlaps. Uses atomic CAS; new ticks are rejected (not queued) while one is running.                                                                                                                                               |
+| `supervisor.c` / `.h`          | 733        | Top-level orchestrator. Owns engine + pool + gate lifecycle, job ID generation, structured JSON logging, circuit breaker config, memory limit config, `supervisor_status_json()`. Default memory limit: `256M`.                                                        |
+| `bridge_jni.cpp`               | 196        | JNI bridge for the `BridgeRouterKt` can/call API. Caches `nativePHPCan` and `nativePHPCall` method IDs at init; called by `libphp_wrapper.so` for native↔PHP capability routing.                                                                                       |
+| `libphp_wrapper.cpp`           | 121        | libphp.so dlopen wrapper. Re-opens `libphp.so` and `libcompat.so` via `RTLD_GLOBAL` in a C++ constructor. Also re-opens `libphp_wrapper.so` itself with `RTLD_GLOBAL` to export symbols to PHP extensions.                                                             |
+| `zts_guard.h`                  | 46         | `#error` if ZTS is not defined at compile time. `nativephp_verify_zts_runtime()` for belt-and-suspenders check.                                                                                                                                                        |
+| `sqlite_pool.c` / `.h`         | ~280       | Lightweight SQLite connection pool. Pre-opens N WAL connections; worker threads borrow/return via condvar. **Disabled by default** (`NATIVEPHP_ENABLE_SQLITE_MODULES=OFF`). Requires `sqlite3.h` in include path.                                                      |
+| `native_queue.c` / `.h`        | ~310       | Zero-PHP-overhead queue introspection. Queries `jobs` table directly via SQLite C API. **Disabled by default** (same CMake flag). When enabled, avoids PHP bootstrap for empty queues.                                                                                 |
+| `compat/android_compat.cpp`    | ~110       | Bionic compatibility shim (`getdtablesize()`, `copy_file_range()` polyfills) **plus RTLD_GLOBAL preloader** for libphp.so via `JNI_OnLoad`. Primary mechanism for OPcache symbol visibility. No glob/globfree polyfill (those are handled via `php_config.h` patches). |
+| `PHP.c` / `.h`                 | —          | Legacy single-request PHP execution for UI process HTTP serving.                                                                                                                                                                                                       |
 
 ### 4.2 RTLD_GLOBAL Preloader (in `android_compat.cpp`)
 
@@ -266,7 +266,7 @@ See §9 for the full explanation of why this is necessary and the bugs we fixed.
 
 ### 4.3 PhpEngine Init Sequence (described in `php_engine.h`)
 
-> **Status:** `php_engine.c` is listed as a source in `CMakeLists.txt`. The interface is fully defined in `php_engine.h` (89 lines, including `fix_opcache_tls_cache()` and `fix_opcache_per_thread_state()` for Android emutls). The `.c` implementation file has not yet been committed to the repository.
+> **Status:** `php_engine.c` (1188 lines) is committed and compiled into `libphp_wrapper.so`. The interface is fully defined in `php_engine.h` (89 lines, including `fix_opcache_tls_cache()` and `fix_opcache_per_thread_state()` for Android emutls).
 
 ```
 php_engine_init(ini_path, ini_entries, app_base_path)
@@ -369,7 +369,7 @@ worker_thread_func(pool, worker_id)
        └── ts_free_thread()
 ```
 
-### 4.5 Per-Job Isolation (`php_request_context.h` interface; `.c` not yet committed)
+### 4.5 Per-Job Isolation (`php_request_context.c` / `.h`)
 
 Each job gets a `php_request_context_t` struct with:
 
@@ -1237,7 +1237,7 @@ Listen for worker lifecycle events in your app:
    - `AGENT-GUIDE-NATIVEPHP-WORKERS.md` — source table, invariant #5, OPcache section fixed
    - `MULTITHREADING-IMPLEMENTATION.md` — §9.5, §4.1 table, §4.2, §4.3, §15 table updated
    - `architecture-concurrent-runtime.md` — Files Changed/Created section updated
-   - Note: if/when `php_engine.c` is committed, verify its inline comments don't still say "php_preloader"
+   - **Note (2026-02-18):** `php_engine.c` is now committed (1188 lines). Its inline comment at line ~779 still says "php_preloader.c" — updated in the source file to reference `compat/android_compat.cpp`.
 
 3. ~~**Verify OPcache loads on device**~~ — ✅ **VERIFIED** (2026-02-17). Confirmed
    on emulator (API 36). The critical fix was applying `patchelf --add-needed
@@ -1294,21 +1294,21 @@ libphp.so` to opcache.so — **both** in the mobile-air repo AND in the
 
 ### C/C++ (Native Layer)
 
-| File                          | Lines | Description                                                                                                                                                             |
-| ----------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `php_engine.h`                | 89    | Engine singleton interface. Declares `fix_opcache_tls_cache()`, `fix_opcache_per_thread_state()`. **`.c` in CMakeLists.txt; not yet committed.**                        |
-| `php_thread_context.c` / `.h` | 129   | TSRM attach/detach per worker thread. Defines `TSRMLS_CACHE_DEFINE()` for its own TU to avoid emutls conflicts.                                                         |
-| `php_request_context.h`       | 182   | Per-job execution context interface. Declares `php_request_create/execute/destroy()`, status/type enums, priority field. **`.c` in CMakeLists.txt; not yet committed.** |
-| `worker_pool.c` / `.h`        | 740   | Pthread pool, priority queue, circuit breaker, stagger, UI-lane yield                                                                                                   |
-| `supervisor.c` / `.h`         | 733   | Orchestrator, SQLite pool lifecycle, native queue peek, JNI API. Default memory_limit: `256M`.                                                                          |
-| `scheduler_gate.c` / `.h`     | 67    | Mutex gate for schedule:run exclusivity                                                                                                                                 |
-| `bridge_jni.cpp`              | 196   | JNI bridge for BridgeRouterKt can/call API. Replaces removed `php_bridge.c`.                                                                                            |
-| `libphp_wrapper.cpp`          | 121   | dlopen wrapper: re-opens libphp.so + libcompat.so + libphp_wrapper.so with RTLD_GLOBAL via C++ constructor.                                                             |
-| `zts_guard.h`                 | 46    | Compile-time/runtime ZTS verification                                                                                                                                   |
-| `sqlite_pool.c` / `.h`        | ~280  | SQLite connection pool (optional, integrated with supervisor)                                                                                                           |
-| `native_queue.c` / `.h`       | ~310  | Native queue peek (optional, integrated with supervisor)                                                                                                                |
-| `compat/android_compat.cpp`   | ~110  | Bionic compatibility shim (`getdtablesize()`, `copy_file_range()`) + **RTLD_GLOBAL preloader** (JNI_OnLoad). No glob polyfill — those are patched via `php_config.h`.   |
-| `CMakeLists.txt`              | ~225  | Build config, ZTS check, glob patch, optional SQLite modules                                                                                                            |
+| File                           | Lines      | Description                                                                                                                                                           |
+| ------------------------------ | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `php_engine.c` / `.h`          | 1188 / 89  | Engine singleton. RTLD_GLOBAL probe, OPcache dlopen, `php_embed_init()`, warmup pass. Declares `fix_opcache_tls_cache()`, `fix_opcache_per_thread_state()`.           |
+| `php_thread_context.c` / `.h`  | 129        | TSRM attach/detach per worker thread. Defines `TSRMLS_CACHE_DEFINE()` for its own TU to avoid emutls conflicts.                                                       |
+| `php_request_context.c` / `.h` | 1038 / 182 | Per-job execution context. Per-thread output buffers, cooperative cancellation, HTTP `$_SERVER` injection, status/type enums, priority field.                         |
+| `worker_pool.c` / `.h`         | 740        | Pthread pool, priority queue, circuit breaker, stagger, UI-lane yield                                                                                                 |
+| `supervisor.c` / `.h`          | 733        | Orchestrator, SQLite pool lifecycle, native queue peek, JNI API. Default memory_limit: `256M`.                                                                        |
+| `scheduler_gate.c` / `.h`      | 67         | Mutex gate for schedule:run exclusivity                                                                                                                               |
+| `bridge_jni.cpp`               | 196        | JNI bridge for BridgeRouterKt can/call API. Replaces removed `php_bridge.c`.                                                                                          |
+| `libphp_wrapper.cpp`           | 121        | dlopen wrapper: re-opens libphp.so + libcompat.so + libphp_wrapper.so with RTLD_GLOBAL via C++ constructor.                                                           |
+| `zts_guard.h`                  | 46         | Compile-time/runtime ZTS verification                                                                                                                                 |
+| `sqlite_pool.c` / `.h`         | ~280       | SQLite connection pool (optional, integrated with supervisor)                                                                                                         |
+| `native_queue.c` / `.h`        | ~310       | Native queue peek (optional, integrated with supervisor)                                                                                                              |
+| `compat/android_compat.cpp`    | ~110       | Bionic compatibility shim (`getdtablesize()`, `copy_file_range()`) + **RTLD_GLOBAL preloader** (JNI_OnLoad). No glob polyfill — those are patched via `php_config.h`. |
+| `CMakeLists.txt`               | ~225       | Build config, ZTS check, glob patch, optional SQLite modules                                                                                                          |
 
 All C files live in: `resources/androidstudio/app/src/main/cpp/`
 

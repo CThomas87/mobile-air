@@ -719,6 +719,64 @@ char *supervisor_queue_status_json(void)
     return strdup("{\"error\":\"db_path not configured\"}");
 }
 
+int supervisor_native_db_pool_has_pool(void)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    return s_sqlite_pool != NULL;
+#else
+    return 0;
+#endif
+}
+
+void *supervisor_native_db_pool_acquire(uint32_t timeout_ms)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (!s_sqlite_pool)
+    {
+        return NULL;
+    }
+
+    return (void *)sqlite_pool_acquire(s_sqlite_pool, timeout_ms);
+#else
+    (void)timeout_ms;
+    return NULL;
+#endif
+}
+
+int supervisor_native_db_pool_release(void *handle)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    if (!s_sqlite_pool || !handle)
+    {
+        return 0;
+    }
+
+    sqlite_pool_release(s_sqlite_pool, (sqlite3 *)handle);
+    return 1;
+#else
+    (void)handle;
+    return 0;
+#endif
+}
+
+int supervisor_native_db_pool_total(void)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    return s_sqlite_pool ? sqlite_pool_total_count(s_sqlite_pool) : 0;
+#else
+    return 0;
+#endif
+}
+
+int supervisor_native_db_pool_available(void)
+{
+#ifdef NATIVEPHP_HAS_SQLITE3
+    return s_sqlite_pool ? sqlite_pool_available_count(s_sqlite_pool) : 0;
+#else
+    return 0;
+#endif
+}
+
 void supervisor_engine_shutdown(void)
 {
     /* Ensure supervisor is stopped first */

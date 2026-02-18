@@ -13,10 +13,8 @@
 #include <stdio.h>
 #include <time.h>
 
-/* We dlopen SQLite at runtime via PHP's bundled libsqlite3, so include
- * the header for the function signatures only.  On Android the
- * libsqlite3.so is already loaded by PHP. */
-#include <sqlite3.h>
+/* SQLite symbol declarations for Android system SQLite linkage. */
+#include "sqlite_compat.h"
 
 #ifdef __ANDROID__
 #include <android/log.h>

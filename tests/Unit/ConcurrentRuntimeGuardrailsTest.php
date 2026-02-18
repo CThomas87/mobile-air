@@ -21,6 +21,23 @@ class ConcurrentRuntimeGuardrailsTest extends TestCase
         $this->assertStringContainsString('"/* #undef ZTS */"', $cmake);
     }
 
+    public function test_cmake_sets_timing_telemetry_flag_by_build_type(): void
+    {
+        $cmake = file_get_contents($this->repoFile('resources/androidstudio/app/src/main/cpp/CMakeLists.txt'));
+
+        $this->assertStringContainsString('NATIVEPHP_ENABLE_TIMING_TELEMETRY=1', $cmake);
+        $this->assertStringContainsString('NATIVEPHP_ENABLE_TIMING_TELEMETRY=0', $cmake);
+    }
+
+    public function test_php_bridge_timing_logs_are_compile_time_guarded(): void
+    {
+        $bridge = file_get_contents($this->repoFile('resources/androidstudio/app/src/main/cpp/php_bridge.c'));
+
+        $this->assertStringContainsString('#define TIMING_LOG(...) LOGI(__VA_ARGS__)', $bridge);
+        $this->assertStringContainsString('#define TIMING_LOG(...) ((void)0)', $bridge);
+        $this->assertStringContainsString('TIMING_LOG("⏱️ [TIMING]', $bridge);
+    }
+
     public function test_php_runtime_units_include_zts_guard_header(): void
     {
         $files = [
@@ -120,6 +137,35 @@ class ConcurrentRuntimeGuardrailsTest extends TestCase
             $supervisor,
             'supervisor_await_job should not release the scheduler gate (notify_job_completed handles it)'
         );
+    }
+
+    public function test_supervisor_exposes_submit_cancel_await_primitives_through_native_bridge(): void
+    {
+        $supervisorH = file_get_contents($this->repoFile('resources/androidstudio/app/src/main/cpp/supervisor.h'));
+        $supervisorC = file_get_contents($this->repoFile('resources/androidstudio/app/src/main/cpp/supervisor.c'));
+        $bridge = file_get_contents($this->repoFile('resources/androidstudio/app/src/main/cpp/php_bridge.c'));
+
+        $this->assertStringContainsString('char *supervisor_enqueue_queue_job', $supervisorH);
+        $this->assertStringContainsString('char *supervisor_await_job', $supervisorH);
+        $this->assertStringContainsString('int supervisor_cancel_job', $supervisorH);
+
+        $this->assertStringContainsString('char *supervisor_await_job(const char *job_id, uint32_t timeout_ms)', $supervisorC);
+        $this->assertStringContainsString('int supervisor_cancel_job(const char *job_id)', $supervisorC);
+
+        $this->assertStringContainsString('native_supervisor_await_job', $bridge);
+        $this->assertStringContainsString('native_supervisor_cancel_job', $bridge);
+        $this->assertStringContainsString('"nativeAwaitJob"', $bridge);
+        $this->assertStringContainsString('"nativeCancelJob"', $bridge);
+    }
+
+    public function test_scheduler_tick_enqueue_is_gate_controlled_for_cadence(): void
+    {
+        $supervisor = file_get_contents($this->repoFile('resources/androidstudio/app/src/main/cpp/supervisor.c'));
+
+        $this->assertStringContainsString('if (!scheduler_gate_try_acquire(s_sched_gate))', $supervisor);
+        $this->assertStringContainsString('SV_LOGI("Scheduler tick already running, skipping")', $supervisor);
+        $this->assertStringContainsString('SV_LOGI("Scheduler tick enqueued: %s", job_id);', $supervisor);
+        $this->assertStringContainsString('sv_log_event("tick_enqueued", job_id, "scheduler")', $supervisor);
     }
 
     public function test_output_routing_uses_tls_not_global_buffer(): void

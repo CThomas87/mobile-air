@@ -160,7 +160,6 @@ static void log_loaded_zend_extensions(void)
     ENGINE_LOGI("Zend OPcache present: %s", zend_get_extension("Zend OPcache") ? "yes" : "no");
 }
 
-
 /* ─── emutls TLS fix for opcache.so on Android ───
  *
  * On Android API < 29, __thread variables use emulated TLS (emutls).
@@ -777,14 +776,14 @@ int php_engine_init(const char *ini_path,
             /*
              * RTLD_GLOBAL promotion for libphp.so.
              *
-             * The primary RTLD_GLOBAL loading is handled by php_preloader.c
-             * (loaded via System.loadLibrary("php_preloader") BEFORE "php").
-             * On Android API 36+, re-opening an already RTLD_LOCAL library
-             * with dlopen(RTLD_GLOBAL) does NOT reliably promote its symbols.
+             * The primary RTLD_GLOBAL loading is handled by compat/android_compat.cpp
+             * (JNI_OnLoad in libcompat.so, loaded via System.loadLibrary("compat")
+             * BEFORE "php"). On Android API 36+, re-opening an already RTLD_LOCAL
+             * library with dlopen(RTLD_GLOBAL) does NOT reliably promote its symbols.
              *
              * This code remains as a belt-and-suspenders fallback for devices
-             * where the preloader approach might not apply, or for older API
-             * levels where post-load promotion does work.
+             * where the compat preloader hasn't run, or for older API levels
+             * where post-load promotion does work.
              */
             void *php_global = dlopen(di.dli_fname, RTLD_NOW | RTLD_GLOBAL);
             if (php_global)

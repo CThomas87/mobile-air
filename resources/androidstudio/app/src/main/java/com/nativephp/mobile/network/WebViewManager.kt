@@ -259,6 +259,12 @@ class WebViewManager(
                     // Regular PHP requests
                     url.contains("127.0.0.1") -> {
                         Log.d(TAG, "🌐 Handling PHP request")
+                        if (url.contains("/workers/dispatch")) {
+                            mainHandler.post {
+                                (context as? MainActivity)?.ensureWorkerServiceRunning("dispatch_request")
+                            }
+                        }
+
                         val response = phpHandler.handlePHPRequest(request, phpBridge.getLastPostData())
 
                         // shouldInterceptRequest bypasses onPageFinished, so we must

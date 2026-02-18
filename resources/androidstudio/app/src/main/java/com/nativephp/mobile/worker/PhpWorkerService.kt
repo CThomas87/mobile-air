@@ -48,6 +48,10 @@ class PhpWorkerService : Service() {
         private const val DEFAULT_WORKER_COUNT = 2
         private const val DEFAULT_SCHEDULER_INTERVAL_MS = 60_000L // 1 minute
         private const val DEFAULT_QUEUE_POLL_INTERVAL_MS = 5_000L // 5 seconds
+        private const val ACTIVE_QUEUE_POLL_MIN_MS = 750L
+        private const val ACTIVE_QUEUE_POLL_BASE_MS = 1_500L
+        private const val IDLE_QUEUE_POLL_MIN_MS = 5_000L
+        private const val IDLE_QUEUE_POLL_MAX_MS = 30_000L
         private const val DEFAULT_QUEUES = "high,default,low"
         private const val DEFAULT_CONNECTION = "database"
 
@@ -260,13 +264,21 @@ class PhpWorkerService : Service() {
                 PhpSupervisorBridge.nativeSetMemoryLimit(memoryLimit)
 
                 // Configure worker log
+                val appStorageRoot = java.io.File(appBasePath).parentFile
+                val persistedStoragePath = java.io.File(appStorageRoot, "persisted_data/storage")
+                val persistedDatabasePath = java.io.File(appStorageRoot, "persisted_data/database/database.sqlite")
+
                 if (logEnabled) {
-                    val logPath = "$appBasePath/storage/logs/worker.log"
+                    val logPath = java.io.File(persistedStoragePath, "logs/worker.log").absolutePath
                     PhpSupervisorBridge.nativeSetLogFile(logPath, logMaxSizeKb)
                 }
 
+                val sqlitePath = persistedDatabasePath.absolutePath
+                val sqlitePoolSize = (configuredWorkerCount + 1).coerceIn(2, 8)
+                PhpSupervisorBridge.nativeSetDbPath(sqlitePath, sqlitePoolSize)
+
                 // Start supervisor
-                val startOk = PhpSupervisorBridge.nativeStartSupervisor(mode, workerCount, queues, connection)
+                val startOk = PhpSupervisorBridge.nativeStartSupervisor(mode, configuredWorkerCount, queues, connection)
                 if (!startOk) {
                     Log.e(TAG, "Failed to start supervisor")
                     PhpSupervisorBridge.nativeEngineShutdown()
@@ -287,7 +299,7 @@ class PhpWorkerService : Service() {
                 )
 
                 // Update notification
-                updateNotification("PHP workers active ($workerCount workers)")
+                updateNotification("PHP workers active ($configuredWorkerCount workers)")
 
                 // Start periodic scheduler ticks
                 if (mode == 0 || mode == 2) {
@@ -377,52 +389,117 @@ class PhpWorkerService : Service() {
      */
     private fun startQueuePoller() {
         queuePollerJob = serviceScope.launch {
+            var idleCycles = 0
+
             while (isActive && supervisorStarted) {
+                var nextDelayMs = DEFAULT_QUEUE_POLL_INTERVAL_MS
+
                 try {
                     val snapshot = readSupervisorSnapshot()
                     if (snapshot == null) {
-                        delay(DEFAULT_QUEUE_POLL_INTERVAL_MS)
+                        delay(nextDelayMs)
                         continue
                     }
 
-                    if (snapshot.pendingJobs > 0) {
-                        delay(DEFAULT_QUEUE_POLL_INTERVAL_MS)
-                        continue
-                    }
-
+                    val queueDepth = readNativeQueueDepth()
                     val availableSlots = (configuredWorkerCount - snapshot.activeJobs).coerceAtLeast(0)
-                    if (availableSlots == 0) {
-                        delay(DEFAULT_QUEUE_POLL_INTERVAL_MS)
-                        continue
-                    }
+                    val hasPendingInPool = snapshot.pendingJobs > 0
 
-                    val pendingJobs = mutableListOf<String>()
-                    for (i in 0 until availableSlots) {
-                        val jobId = PhpSupervisorBridge.nativeEnqueueQueueJob("")
-                        if (jobId != null) {
-                            pendingJobs.add(jobId)
+                    if (!hasPendingInPool && availableSlots > 0) {
+                        val dispatchCount = when {
+                            queueDepth > 0 -> minOf(availableSlots, queueDepth)
+                            queueDepth == 0 -> 0
+                            idleCycles < 2 -> 1
+                            else -> 0
                         }
-                    }
 
-                    if (pendingJobs.isNotEmpty()) {
-                        // Await all results concurrently
-                        pendingJobs.map { jobId ->
-                            async(Dispatchers.IO) {
-                                try {
-                                    PhpSupervisorBridge.nativeAwaitJob(jobId, 15 * 1000)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Error awaiting queue job $jobId", e)
-                                    null
+                        if (dispatchCount > 0) {
+                            val pendingJobs = mutableListOf<String>()
+                            for (i in 0 until dispatchCount) {
+                                val jobId = PhpSupervisorBridge.nativeEnqueueQueueJob("")
+                                if (jobId != null) {
+                                    pendingJobs.add(jobId)
                                 }
                             }
-                        }.forEach { it.await() }
+
+                            if (pendingJobs.isNotEmpty()) {
+                                pendingJobs.map { jobId ->
+                                    async(Dispatchers.IO) {
+                                        try {
+                                            PhpSupervisorBridge.nativeAwaitJob(jobId, 15 * 1000)
+                                        } catch (e: Exception) {
+                                            Log.e(TAG, "Error awaiting queue job $jobId", e)
+                                            null
+                                        }
+                                    }
+                                }.forEach { it.await() }
+                            }
+
+                            idleCycles = 0
+                        } else {
+                            idleCycles += 1
+                        }
+                    } else {
+                        idleCycles = if (hasPendingInPool) 0 else (idleCycles + 1)
                     }
+
+                    nextDelayMs = computeQueuePollDelayMs(
+                        queueDepth = queueDepth,
+                        activeJobs = snapshot.activeJobs,
+                        pendingJobs = snapshot.pendingJobs,
+                        idleCycles = idleCycles,
+                    )
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in queue poller cycle", e)
                 }
-                delay(DEFAULT_QUEUE_POLL_INTERVAL_MS)
+
+                delay(nextDelayMs)
             }
         }
+    }
+
+    private fun readNativeQueueDepth(): Int {
+        return try {
+            val status = PhpSupervisorBridge.nativeGetQueueStatus()
+            val root = JSONObject(status)
+            if (!root.has("total")) {
+                -1
+            } else {
+                root.optInt("total", 0).coerceAtLeast(0)
+            }
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
+    private fun computeQueuePollDelayMs(
+        queueDepth: Int,
+        activeJobs: Int,
+        pendingJobs: Int,
+        idleCycles: Int,
+    ): Long {
+        if (queueDepth > 50) {
+            return ACTIVE_QUEUE_POLL_MIN_MS
+        }
+
+        if (queueDepth > 10) {
+            return ACTIVE_QUEUE_POLL_BASE_MS
+        }
+
+        if (queueDepth > 0) {
+            return 2_000L
+        }
+
+        if (activeJobs > 0 || pendingJobs > 0) {
+            return 3_000L
+        }
+
+        if (queueDepth == 0) {
+            val backoff = IDLE_QUEUE_POLL_MIN_MS + (idleCycles.coerceAtMost(10) * 2_000L)
+            return backoff.coerceAtMost(IDLE_QUEUE_POLL_MAX_MS)
+        }
+
+        return DEFAULT_QUEUE_POLL_INTERVAL_MS
     }
 
     private fun readSupervisorSnapshot(): SupervisorSnapshot? {

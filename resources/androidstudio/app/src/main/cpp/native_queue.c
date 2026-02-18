@@ -11,7 +11,7 @@
  * Guard: compiles as stubs if NATIVEPHP_HAS_SQLITE3 is not defined.
  */
 #ifdef NATIVEPHP_HAS_SQLITE3
-#include <sqlite3.h>
+#include "sqlite_compat.h"
 #else
 /* Stub mode */
 #endif

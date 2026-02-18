@@ -77,34 +77,16 @@ add_library(php_wrapper SHARED
 #   cpp/include/sqlite3/
 # Then pass -DNATIVEPHP_SQLITE_DIR=<path> to cmake, or set
 # NATIVEPHP_ENABLE_SQLITE_MODULES=ON with the header available.
-option(NATIVEPHP_ENABLE_SQLITE_MODULES "Build SQLite pool and native queue modules" OFF)
+option(NATIVEPHP_ENABLE_SQLITE_MODULES "Build SQLite pool and native queue modules" ON)
 
 if(NATIVEPHP_ENABLE_SQLITE_MODULES)
-    # Look for sqlite3.h in the include path
-    find_path(SQLITE3_INCLUDE_DIR sqlite3.h
-        HINTS ${CMAKE_CURRENT_SOURCE_DIR}/include/sqlite3
-              ${CMAKE_CURRENT_SOURCE_DIR}/include
+    target_sources(php_wrapper PRIVATE
+        sqlite_pool.c
+        native_queue.c
     )
-    if(SQLITE3_INCLUDE_DIR)
-        message(STATUS "SQLite3 header found at ${SQLITE3_INCLUDE_DIR}")
-        target_sources(php_wrapper PRIVATE
-            sqlite_pool.c
-            native_queue.c
-        )
-        target_include_directories(php_wrapper PRIVATE ${SQLITE3_INCLUDE_DIR})
-        target_compile_definitions(php_wrapper PRIVATE NATIVEPHP_HAS_SQLITE3=1)
-
-        # If the SQLite amalgamation .c is present, compile it in;
-        # otherwise assume SQLite symbols come from libphp.so at runtime.
-        if(EXISTS "${SQLITE3_INCLUDE_DIR}/sqlite3.c")
-            target_sources(php_wrapper PRIVATE "${SQLITE3_INCLUDE_DIR}/sqlite3.c")
-            message(STATUS "SQLite3 amalgamation compiled into php_wrapper")
-        else()
-            message(STATUS "SQLite3 symbols expected from libphp.so (dynamic)")
-        endif()
-    else()
-        message(WARNING "NATIVEPHP_ENABLE_SQLITE_MODULES=ON but sqlite3.h not found; skipping")
-    endif()
+    target_compile_definitions(php_wrapper PRIVATE NATIVEPHP_HAS_SQLITE3=1)
+    target_link_libraries(php_wrapper sqlite3)
+    message(STATUS "SQLite3 modules enabled (linked from Android system library)")
 endif()
 
 target_include_directories(php_wrapper PUBLIC
@@ -188,8 +170,15 @@ target_compile_definitions(php_wrapper PRIVATE
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    add_compile_definitions(DEBUG=1)
+    target_compile_definitions(php_wrapper PRIVATE
+            DEBUG=1
+            NATIVEPHP_ENABLE_TIMING_TELEMETRY=1
+    )
     add_compile_options(-g -O0 -fno-limit-debug-info)
+else()
+    target_compile_definitions(php_wrapper PRIVATE
+            NATIVEPHP_ENABLE_TIMING_TELEMETRY=0
+    )
 endif()
 
 # Copy libraries to output directory
