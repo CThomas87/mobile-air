@@ -26,8 +26,7 @@ independently buildable, non-breaking, and reviewable in isolation.
    - [PR 11 — iOS Worker Support](#pr-11--ios-worker-support)
    - [PR 12 — Optional C Modules (SQLite Pool + Native Queue)](#pr-12--optional-c-modules-sqlite-pool--native-queue)
    - [PR 13 — WorkManager Integration (Android 14+)](#pr-13--workmanager-integration-android-14)
-   - [PR 14 — Build Config Cleanup](#pr-14--build-config-cleanup)
-   - [PR 15 — Documentation Pass](#pr-15--documentation-pass)
+   - [PR 14 — Documentation Pass](#pr-14--documentation-pass)
 4. [Dependency Graph](#4-dependency-graph)
 5. [Risk Register](#5-risk-register)
 6. [Testing Checkpoints](#6-testing-checkpoints)
@@ -793,43 +792,7 @@ ProGuard in their own release builds.
 
 ---
 
-### PR 14 — Build Config Cleanup
-
-**Goal:** Remove debug artifacts and fix the hardcoded `isMinifyEnabled = false`
-that would affect all consumer apps' release APKs.
-
-#### Files
-
-| Action | File                                                                                                                        |
-| ------ | --------------------------------------------------------------------------------------------------------------------------- |
-| DELETE | `opcache.so` (root — debug copy, duplicates jniLibs)                                                                        |
-| DELETE | `disasm.txt`, `disasm2.txt`, `dynsyms.txt`, `relocs.txt` (symbol dump artifacts)                                            |
-| DELETE | `scripts/android_compat.c` (stale C draft, superseded by `compat/android_compat.cpp`)                                       |
-| MODIFY | `resources/androidstudio/app/build.gradle.kts` (restore `REPLACE_MINIFY_ENABLED` + `REPLACE_SHRINK_RESOURCES` placeholders) |
-| MODIFY | `.gitignore` (add `*.so` root-level, `disasm*.txt`, `dynsyms.txt`, `relocs.txt`)                                            |
-
-#### Why the minify fix matters
-
-`isMinifyEnabled = false` (hardcoded) disables ProGuard for **all consumer app
-release builds** that use the template — roughly 20–40% APK size increase and
-no code shrinking. The correct value is the template placeholder
-`REPLACE_MINIFY_ENABLED` which NativePHP's `native:build` replaces per-app.
-
-#### .gitignore additions
-
-```
-# Native build debug artifacts
-/opcache.so
-/disasm*.txt
-/dynsyms.txt
-/relocs.txt
-```
-
-#### Risk: LOW (cleanup only)
-
----
-
-### PR 15 — Documentation Pass
+### PR 14 — Documentation Pass
 
 **Goal:** Ensure all four documentation files accurately reflect the implemented
 state. Update "not yet committed" notes now that `php_engine.c` and
